@@ -247,6 +247,31 @@ struct ConflictFile {
     ② git 传 `$MERGED`/`$LOCAL` 为**相对路径**（相对进程 CWD）→ 启动时 `canonicalize`（并剥 `\\?\`），
     否则自带的「全部解决后 git add」静默跳过（`strip_prefix` 相对 vs 绝对失配），退出码/协议照常但提示误导
 
+### Phase 5: 工作空间（IDEA 式仓库管理，完成，2026-08-14）
+用户新增需求：打开本地含 `.git` 的文件夹即可托管仓库，参考 IDEA 的右键 Git 菜单 → 拉取/推送/解决冲突。
+- **后端 git-bridge**（✓ `crates/git-bridge` workspace 模块 + 4 个集成测试，真实本地 bare remote）：
+  - `repo_status`：根目录 / 分支 / upstream（`rev-list --left-right --count` 算 ahead/behind）/ merging 状态
+    （detect MERGE_HEAD、rebase-merge…）/ 未合并文件数（index stage≠0）/ 工作树脏标记 / 人话 summary（`master ↑2 ↓1`）
+  - `pull_now`（`pull --no-edit`，conflict 时吞 Err 进 message、报 conflicted）、`push_now`（`GIT_TERMINAL_PROMPT=0` 永不挂起）、
+    `refresh_workspace`（fetch + status）、`open_workspace`（校验 → 设 workspace_root → 记 recents）
+  - recent 持久化：`app_data_dir/workspaces.json`（去重插头、上限 10）（✓）
+  - workspace_root 参与 `scan_repo`/`open_file`（工作区模式打开冲突文件不再只认 mergetool 会话）
+  - **非 mergetool 启动退出码 0**：`on_window_event` 仅在 `launch.is_mergetool_launch()` 时 `std::process::exit(code)`
+- **前端**（✓ `WorkspaceHome` 首页最近打开/选择文件夹、`WorkspaceBar` 状态卡片 + 刷新/拉取/推送/解决冲突按钮）：
+  - 打开后自动扫未合并文件并打开第一个冲突（✓）
+  - 拉取产生冲突 → toast 提示 → 自动转入三栏逐块解决 → 保存（✓ 与既有决策流程完全打通）
+- **真实应用 CDP E2E（✓ 2026-08-14，`scripts/e2e-workspace.mjs` 四阶段全部 PASS）**：
+  - open：首页点「最近打开」→ 卡片 `master ↑1` ✓
+  - push：点「推送」→ `master` 同步 ✓
+  - pull：`刷新` → `↓1` → `拉取` 快进 ✓
+  - conflict：双端改同一行 → 刷新/拉取 → 冲突 toast + 三栏 1 个内嵌操作条 → 取左 → 保存「已保存并已 git add」→
+    列表「已解决」，git 状态核验：index 无 unmerged、工作树为取左内容 ✓
+- **E2E 踩的两类坑（已写回脚本）**：
+  - V8 对 `A() && () => {}` / `const c = () => {}` 后跟调用在嵌套上下文有解析歧义 →
+    组合片段必须整体加括号 `(fn)()`（脚本里 `call(fnSrc)` 助手）
+  - 后端命令不能直接 `invoke` 驱动 UI（绕过 React）→ 必须点真实按钮/最近条目走 App handler；
+    且 recent 是 mount 时快照，改完 recents 要重启 app 才刷新
+
 ## 7. 风险
 
 | 风险 | 缓解 |
@@ -259,12 +284,14 @@ struct ConflictFile {
 
 ## 8. 下一步
 
-Phase 1–4（MVP：三栏 + 多文件 + 保存/退出码协议 + NSIS 安装包 + 自动登记）已全部完成，真实 `git mergetool` 全流程验证通过。
+Phase 1–5（MVP：三栏 + 多文件 + 保存/退出码协议 + NSIS 安装包 + 自动登记 + 工作空间拉取/推送/冲突解决）已全部完成，
+真实 `git mergetool` 全流程与工作空间四阶段 CDP E2E 均验证通过。
 
 后续迭代（非 MVP）：
 - macOS `.dmg`（同一套代码，补 bundled 前端 + 公证）
 - 拖拽冲突块、批量处理、历史记录
 - 主题切换（浅色）、完整 i18n
+- 工作空间增强：分支切换/新建、stash、提交对话框、恢复进行中合并、代理/推送配置
 - Windows ARM / 便携版、非 UTF-8 完整编码、二进制冲突
 
 **仓库**: https://github.com/1540962572/MergeDrag.git
