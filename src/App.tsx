@@ -193,6 +193,16 @@ export default function App() {
     setWsBusy("idle");
   }, [loadConflicts]);
 
+  /** 分支/暂存/提交生效后静默刷新状态卡（不切换 busy，避免按钮闪烁）。 */
+  const syncWsStatus = useCallback(async () => {
+    try {
+      const snap = await invoke<WorkspaceSnapshot>("refresh_workspace");
+      setWorkspaceStatus(snap.status);
+    } catch {
+      /* 保留原状，改由下一次手动刷新补偿 */
+    }
+  }, []);
+
   const current: MergeDocument | null = session.current ?? null;
 
   /** 空壳首页：未开工作区、未通过 mergetool 启动会话时显示。 */
@@ -459,6 +469,8 @@ export default function App() {
                     onPull={pullWs}
                     onPush={pushWs}
                     onResolveConflicts={resolveConflicts}
+                    onToast={setWsToast}
+                    onChanged={syncWsStatus}
                   />
                 ) : undefined
               }

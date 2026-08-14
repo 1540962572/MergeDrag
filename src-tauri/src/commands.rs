@@ -423,6 +423,78 @@ pub fn list_workspaces(app: tauri::AppHandle) -> Result<Vec<RecentWorkspace>, St
     read_recent(&app)
 }
 
+// ---- workspace: branch / stash / commit -------------------------------------
+
+/// 列出全部本地分支。
+#[tauri::command]
+pub fn list_branches(state: State<'_, AppState>) -> Result<Vec<git_bridge::BranchInfo>, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::list_branches(&root).map_err(|e| e.to_string())
+}
+
+/// 新建本地分支（不切换）。返回确认文案。
+#[tauri::command]
+pub fn create_branch(state: State<'_, AppState>, name: String) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::create_branch(&root, &name).map_err(|e| e.to_string())?;
+    Ok(format!("已创建分支 {name}"))
+}
+
+/// 切换到分支 `name`；force=true 丢弃未提交改动。返回 git 切换输出。
+#[tauri::command]
+pub fn switch_branch(
+    state: State<'_, AppState>,
+    name: String,
+    force: bool,
+) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::switch_branch(&root, &name, force).map_err(|e| e.to_string())
+}
+
+/// 列出 stash。
+#[tauri::command]
+pub fn list_stashes(state: State<'_, AppState>) -> Result<Vec<git_bridge::StashEntry>, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::list_stashes(&root).map_err(|e| e.to_string())
+}
+
+/// 保存改动到 stash（message 可空，空则用 git 自动生成的 WIP on …）。
+#[tauri::command]
+pub fn stash_push(
+    state: State<'_, AppState>,
+    message: Option<String>,
+) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    let msg = message.unwrap_or_default();
+    git_bridge::stash_push(&root, &msg).map_err(|e| e.to_string())
+}
+
+/// 恢复第 `index` 条 stash（缺省 0 = 最近一条）并从列表移除。返回 git 输出。
+#[tauri::command]
+pub fn stash_pop(state: State<'_, AppState>, index: Option<usize>) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    match index.unwrap_or(0) {
+        0 => git_bridge::stash_pop(&root),
+        n => git_bridge::stash_pop_index(&root, n),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// 删除第 `index` 条 stash。
+#[tauri::command]
+pub fn stash_drop(state: State<'_, AppState>, index: usize) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::stash_drop(&root, index).map_err(|e| e.to_string())?;
+    Ok(format!("已删除 stash@{index}"))
+}
+
+/// 暂存并提交全部改动（`git add -A` + `git commit -m`）。返回 `短hash 标题`。
+#[tauri::command]
+pub fn commit_all(state: State<'_, AppState>, message: String) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::commit_all(&root, &message).map_err(|e| e.to_string())
+}
+
 // ---- workspace helpers ------------------------------------------------------
 
 /// 当前仓库根（供 scan/open_file 用）：优先工作空间，其次 mergetool 的 --merged 反推。

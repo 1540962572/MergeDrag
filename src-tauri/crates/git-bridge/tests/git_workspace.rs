@@ -4,7 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use git_bridge::{pull, push, repo_status};
+use git_bridge::{
+    commit_all, create_branch, list_branches, list_stashes, pull, push, repo_status, stash_drop,
+    stash_pop, stash_pop_index, stash_push, switch_branch,
+};
 
 fn git(dir: &Path, args: &[&str]) -> Output {
     Command::new("git")
@@ -69,6 +72,9 @@ fn fixture() -> Fixture {
     );
     commit(&work, "初始提交");
     run_ok(&work, &["push", "origin", "master"]);
+    // 本地身份：commit_all 走不带 -c 的 `git commit`，需要仓库级身份可用。
+    run_ok(&work, &["config", "user.name", "md-local"]);
+    run_ok(&work, &["config", "user.email", "md-local@test"]);
 
     Fixture {
         _tmp: tmp,
@@ -177,4 +183,179 @@ fn merging_and_conflict_count_detected() {
     assert_eq!(st.unmerged_count, 1);
     assert!(st.summary.contains("合并中"), "summary: {}", st.summary);
     assert!(st.summary.contains("1 个冲突"), "summary: {}", st.summary);
+}
+
+/// 在 work 里落一个已跟踪的 data.txt 基线，供“改已跟踪文件”的场景使用。
+fn seed_data(fx: &Fixture) {
+    std::fs::write(fx.work.join("data.txt"), "a\nb\nc\n").unwrap();
+    run_ok(&fx.work, &["add", "data.txt"]);
+    commit(&fx.work, "加 data.txt");
+}
+
+#[test]
+fn branch_create_switch_and_current_marker() {
+    let fx = fixture();
+
+    let branches = list_branches(&fx.work).unwrap();
+    assert_eq!(branches.len(), 1, "初始只有 master");
+    assert_eq!(branches[0].name, "master");
+    assert!(branches[0].current);
+
+    // 空名字直接拒绝。
+    assert!(create_branch(&fx.work, "  ").is_err());
+
+    create_branch(&fx.work, "feature").unwrap();
+    let branches = list_branches(&fx.work).unwrap();
+    assert_eq!(branches.len(), 2);
+    let master = branches.iter().find(|b| b.name == "master").unwrap();
+    let feature = branches.iter().find(|b| b.name == "feature").unwrap();
+    assert!(master.current && !feature.current, "master 仍是当前分支");
+
+    switch_branch(&fx.work, "feature", false).unwrap();
+    let branches = list_branches(&fx.work).unwrap();
+    assert!(branches.iter().find(|b| b.name == "feature").unwrap().current);
+    assert_eq!(
+        repo_status(&fx.work).unwrap().branch.as_deref(),
+        Some("feature")
+    );
+
+    switch_branch(&fx.work, "master", false).unwrap();
+    assert_eq!(
+        repo_status(&fx.work).unwrap().branch.as_deref(),
+        Some("master")
+    );
+}
+
+#[test]
+fn switch_branch_blocks_and_forces_dirty_tree() {
+    let fx = fixture();
+    seed_data(&fx);
+
+    create_branch(&fx.work, "feature").unwrap();
+    switch_branch(&fx.work, "feature", false).unwrap();
+    std::fs::write(fx.work.join("data.txt"), "feature 内容\n").unwrap();
+    run_ok(&fx.work, &["add", "data.txt"]); // commit() 不带 -a，须先暂存
+    commit(&fx.work, "feature 提交");
+    switch_branch(&fx.work, "master", false).unwrap();
+
+    // master 工作树有未提交改动，且两分支该文件内容不同 → 普通切换被 git 拒绝。
+    std::fs::write(fx.work.join("data.txt"), "master 未提交改动\n").unwrap();
+    assert!(
+        switch_branch(&fx.work, "feature", false).is_err(),
+        "有本地改动时应拒绝切换"
+    );
+    assert_eq!(
+        repo_status(&fx.work).unwrap().branch.as_deref(),
+        Some("master"),
+        "失败的切换不应改分支"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.work.join("data.txt")).unwrap(),
+        "master 未提交改动\n",
+        "失败的切换不应动工作树"
+    );
+
+    // force 切换丢弃改动，工作树取 feature 的文件内容。
+    switch_branch(&fx.work, "feature", true).unwrap();
+    assert_eq!(
+        repo_status(&fx.work).unwrap().branch.as_deref(),
+        Some("feature")
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.work.join("data.txt")).unwrap(),
+        "feature 内容\n"
+    );
+}
+
+#[test]
+fn stash_push_list_pop_round_trip() {
+    let fx = fixture();
+    seed_data(&fx);
+    assert!(list_stashes(&fx.work).unwrap().is_empty());
+
+    std::fs::write(fx.work.join("data.txt"), "改动\n").unwrap();
+    stash_push(&fx.work, "临时改动").unwrap();
+
+    let stashes = list_stashes(&fx.work).unwrap();
+    assert_eq!(stashes.len(), 1);
+    assert_eq!(stashes[0].index, 0);
+    assert!(
+        stashes[0].message.contains("临时改动"),
+        "message: {}",
+        stashes[0].message
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.work.join("data.txt")).unwrap(),
+        "a\nb\nc\n",
+        "stash 后工作树应还原基线"
+    );
+
+    // 干净工作树时 stash_push 应报可读错误而非 git 的原始 No local changes。
+    std::fs::write(fx.work.join("untracked.txt"), "未跟踪\n").unwrap();
+    let err = stash_push(&fx.work, "").unwrap_err();
+    assert!(err.to_string().contains("没有可保存"), "err: {err}");
+
+    // pop 恢复。
+    stash_pop(&fx.work).unwrap();
+    assert!(list_stashes(&fx.work).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(fx.work.join("data.txt")).unwrap(),
+        "改动\n",
+        "pop 应恢复改动"
+    );
+}
+
+#[test]
+fn stash_index_pop_and_drop() {
+    let fx = fixture();
+    seed_data(&fx);
+
+    std::fs::write(fx.work.join("data.txt"), "第一份\n").unwrap();
+    stash_push(&fx.work, "第一份改动").unwrap();
+    std::fs::write(fx.work.join("data.txt"), "第二份\n").unwrap();
+    stash_push(&fx.work, "第二份改动").unwrap();
+
+    let stashes = list_stashes(&fx.work).unwrap();
+    assert_eq!(stashes.len(), 2);
+    assert!(stashes[0].message.contains("第二份"), "最近的在前面");
+
+    // 按序号恢复较旧一条（index=1）。
+    stash_pop_index(&fx.work, 1).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fx.work.join("data.txt")).unwrap(),
+        "第一份\n"
+    );
+    let stashes = list_stashes(&fx.work).unwrap();
+    assert_eq!(stashes.len(), 1);
+    assert!(stashes[0].message.contains("第二份"));
+
+    // 删除剩下的。
+    stash_drop(&fx.work, 0).unwrap();
+    assert!(list_stashes(&fx.work).unwrap().is_empty());
+}
+
+#[test]
+fn commit_all_stages_tracked_and_untracked() {
+    let fx = fixture();
+
+    // 既有未跟踪新文件、又有已跟踪改动 → add -A + commit 一次收编。
+    std::fs::write(fx.work.join("new.txt"), "新文件\n").unwrap();
+    seed_data(&fx); // data.txt 已跟踪
+    std::fs::write(fx.work.join("data.txt"), "改过\n").unwrap();
+    let head_before = run_ok(&fx.work, &["rev-parse", "HEAD"]);
+
+    let summary = commit_all(&fx.work, "feat: 提交全部").unwrap();
+    assert!(summary.contains("feat: 提交全部"), "summary: {summary}");
+    assert_ne!(run_ok(&fx.work, &["rev-parse", "HEAD"]), head_before, "HEAD 前进");
+    let st = repo_status(&fx.work).unwrap();
+    assert!(!st.dirty, "提交后工作树干净");
+
+    // 已跟踪改动与未跟踪文件都进了提交。
+    let files = run_ok(&fx.work, &["show", "--name-only", "--format=", "HEAD"]);
+    assert!(files.contains("data.txt") && files.contains("new.txt"), "files: {files}");
+
+    // 干净工作树二次提交报错，空信息直接拒绝。
+    assert!(commit_all(&fx.work, "没事可提交").is_err());
+    let err = commit_all(&fx.work, "   ").unwrap_err();
+    assert!(err.to_string().contains("不能为空"), "err: {err}");
 }

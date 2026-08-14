@@ -92,6 +92,18 @@ export interface PullOutcome {
   conflicted: boolean;
 }
 
+/** Mirror of git-bridge::BranchInfo. */
+export interface BranchInfo {
+  name: string;
+  current: boolean;
+}
+
+/** Mirror of git-bridge::StashEntry. */
+export interface StashEntry {
+  index: number;
+  message: string;
+}
+
 /** Render a document to plain text (what `apply()` produces in Rust). */
 export function applyHunks(hunks: Hunk[]): string {
   return hunks

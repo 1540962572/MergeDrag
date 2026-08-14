@@ -117,6 +117,15 @@ pub fn run() {
             commands::pull_now,
             commands::push_now,
             commands::list_workspaces,
+            // 分支 / 暂存 / 提交
+            commands::list_branches,
+            commands::create_branch,
+            commands::switch_branch,
+            commands::list_stashes,
+            commands::stash_push,
+            commands::stash_pop,
+            commands::stash_drop,
+            commands::commit_all,
         ])
         // 关闭窗口时按 mergetool 协议定退出码：已保存且全部解决 → 0；否则 → 1。
         // 非 mergetool 启动（工作空间/示例）不参与该协议，直接退出码 0。

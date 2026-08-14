@@ -1,4 +1,6 @@
+import { useState } from "react";
 import type { WorkspaceStatus } from "../../shared/types";
+import { BranchPanel, CommitPanel, StashPanel } from "./git-panels";
 
 interface WorkspaceBarProps {
   status: WorkspaceStatus;
@@ -8,6 +10,10 @@ interface WorkspaceBarProps {
   onPull: () => void;
   onPush: () => void;
   onResolveConflicts: () => void;
+  /** Git 操作面板的结果提示（渲染在卡片下方 .ws-toast）。 */
+  onToast: (m: string) => void;
+  /** 分支/暂存/提交任一生效后触发的静默状态刷新（不干扰按钮 busy 态）。 */
+  onChanged: () => void;
 }
 
 /** 取路径最后一段作为显示名（Windows/Linux/macOS 分隔符都兼容）。 */
@@ -15,6 +21,8 @@ function basename(p: string): string {
   const parts = p.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? p;
 }
+
+type OpenPanel = "none" | "branch" | "stash" | "commit";
 
 export function WorkspaceBar({
   status,
@@ -24,9 +32,14 @@ export function WorkspaceBar({
   onPull,
   onPush,
   onResolveConflicts,
+  onToast,
+  onChanged,
 }: WorkspaceBarProps) {
+  const [open, setOpen] = useState<OpenPanel>("none");
   const busyFlag = busy !== "idle";
   const url = status.upstream?.remoteUrl;
+
+  const toggle = (panel: OpenPanel) => setOpen(open === panel ? "none" : panel);
 
   return (
     <div className="workspace-card">
@@ -85,6 +98,35 @@ export function WorkspaceBar({
           </button>
         )}
       </div>
+      <div className="ws-ops ws-gitops-tools">
+        <button
+          type="button"
+          className={open === "branch" ? "secondary active" : "secondary"}
+          onClick={() => toggle("branch")}
+          title="切换 / 新建分支"
+        >
+          分支
+        </button>
+        <button
+          type="button"
+          className={open === "stash" ? "secondary active" : "secondary"}
+          onClick={() => toggle("stash")}
+          title="保存 / 恢复 / 删除 stash"
+        >
+          暂存
+        </button>
+        <button
+          type="button"
+          className={open === "commit" ? "secondary active" : "secondary"}
+          onClick={() => toggle("commit")}
+          title="提交全部改动"
+        >
+          提交
+        </button>
+      </div>
+      {open === "branch" && <BranchPanel onToast={onToast} onChanged={onChanged} />}
+      {open === "stash" && <StashPanel onToast={onToast} onChanged={onChanged} />}
+      {open === "commit" && <CommitPanel onToast={onToast} onChanged={onChanged} />}
       {toast && <div className="ws-toast">{toast}</div>}
     </div>
   );

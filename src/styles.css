@@ -443,6 +443,137 @@ button.save:hover:not(:disabled) {
   overflow: auto;
 }
 
+/* ---- 工作区 Git 操作面板：分支 / 暂存 / 提交 ---- */
+
+.ws-gitops-tools {
+  margin-top: 4px;
+}
+
+.ws-gitops-tools button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ws-panel {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-list);
+}
+
+.ws-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ws-panel-title {
+  font-weight: 600;
+  color: #fff;
+}
+
+.ws-panel-note {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.ws-panel-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.ws-panel-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-plist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 150px;
+  overflow: auto;
+}
+
+.ws-plist li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 2px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.ws-plist li:last-child {
+  border-bottom: none;
+}
+
+.ws-plist li.current {
+  color: #fff;
+}
+
+.ws-plist li.empty {
+  justify-content: center;
+  color: var(--text-dim);
+}
+
+.ws-bname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-bname em {
+  color: #3d8b40;
+  font-style: normal;
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+.ws-bops {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.ws-bops button {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+button.danger {
+  border-color: #7a3628;
+  color: #e0a89c;
+}
+
+.ws-commit-input {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px;
+  resize: vertical;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.ws-commit-actions {
+  justify-content: space-between;
+}
+
+.ws-commit-hint {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 .home-pane {
   flex: 1;
   display: flex;

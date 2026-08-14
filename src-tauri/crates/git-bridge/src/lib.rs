@@ -226,7 +226,10 @@ pub fn repo_status(repo: &Path) -> Result<WorkspaceStatus, GitBridgeError> {
 }
 
 fn load_upstream(root: &Path) -> Result<Option<UpstreamInfo>, GitBridgeError> {
-    let Some(name) = run_git(
+    // 无上游分支（新建分支、detached HEAD、远端已删）是常态：git 对 @{upstream}
+    // 解析失败会以非零退出并输出 fatal，这里把它当“无上游”，不能当致命错误传播，
+    // 否则 repo_status 会对整张状态卡片失败。真正的基建错误（git 缺失）仍传播。
+    let name = match run_git(
         root,
         &[
             "rev-parse",
@@ -234,24 +237,24 @@ fn load_upstream(root: &Path) -> Result<Option<UpstreamInfo>, GitBridgeError> {
             "--symbolic-full-name",
             "@{upstream}",
         ],
-    )?
-    .map(|s| s.trim().to_string()) else {
-        return Ok(None);
+    ) {
+        Ok(Some(s)) => s.trim().to_string(),
+        Ok(None) | Err(GitBridgeError::Command(_)) => return Ok(None),
+        Err(e) => return Err(e),
     };
     if name.is_empty() || name.starts_with('@') {
         return Ok(None);
     }
 
     // 上游远端 URL：upstream 形如 origin/main，取第一段为远端名。
+    // config 查不到（非远端上游 / 未配置）同样吞掉，回退 origin。
     let remote_name = name.split('/').next().unwrap_or_default();
-    let remote_url = run_git(
-        root,
-        &["config", "--get", &format!("remote.{remote_name}.url")],
-    )?
-    .map(|s| s.trim().to_string());
-    // 未设置远端 URL（如直接跟踪本地分支）时回退 origin。
-    let remote_url = remote_url.or_else(|| {
-        run_git(root, &["config", "--get", "remote.origin.url"])
+    let candidates = [
+        format!("remote.{remote_name}.url"),
+        "remote.origin.url".to_string(),
+    ];
+    let remote_url = candidates.iter().find_map(|key| {
+        run_git(root, &["config", "--get", key])
             .ok()
             .flatten()
             .map(|s| s.trim().to_string())
@@ -340,6 +343,128 @@ pub fn push(repo: &Path) -> Result<String, GitBridgeError> {
 pub fn fetch(repo: &Path) -> Result<String, GitBridgeError> {
     run_git(repo, &["fetch", "--prune"])?
         .ok_or_else(|| GitBridgeError::Command("fetch 无输出".into()))
+}
+
+// ---- workspace: branch / stash / commit -----------------------------------
+
+/// 一个本地分支（UI 分支面板用）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchInfo {
+    /// refname:short，如 `master`。
+    pub name: String,
+    /// 当前检出的分支。
+    pub current: bool,
+}
+
+/// 列出全部本地分支（名字排序，与 `git branch` 一致）。
+pub fn list_branches(repo: &Path) -> Result<Vec<BranchInfo>, GitBridgeError> {
+    let out = run_git(repo, &["branch", "--format=%(refname:short)"])?.unwrap_or_default();
+    let current = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "HEAD".into());
+    Ok(out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let name = l.trim().to_string();
+            BranchInfo {
+                current: name == current,
+                name,
+            }
+        })
+        .collect())
+}
+
+/// 新建本地分支于当前 HEAD（不切换）。名字校验交给 git，错误原样回报。
+pub fn create_branch(repo: &Path, name: &str) -> Result<(), GitBridgeError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(GitBridgeError::Command("分支名不能为空".into()));
+    }
+    run_git(repo, &["branch", name])?;
+    Ok(())
+}
+
+/// 切换到分支 `name`。`force` 为 true 时带 `-f` 丢弃未提交改动。
+/// 返回 checkout 输出（切换提示或错误信息）。
+pub fn switch_branch(repo: &Path, name: &str, force: bool) -> Result<String, GitBridgeError> {
+    let mut args: Vec<&str> = vec!["checkout"];
+    if force {
+        args.push("-f");
+    }
+    args.push(name);
+    Ok(run_git(repo, &args)?.unwrap_or_default())
+}
+
+/// 一条 stash（UI 暂存面板用）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashEntry {
+    /// 列表序号（0 = 最近一条），即 `stash@{n}` 的 n。
+    pub index: usize,
+    /// stash 描述，如 `WIP on master: 1234abc 提交信息`。
+    pub message: String,
+}
+
+/// 列出 stash（`git stash list --format=%gs`），index 与 `stash@{n}` 对应。
+pub fn list_stashes(repo: &Path) -> Result<Vec<StashEntry>, GitBridgeError> {
+    let out = run_git(repo, &["stash", "list", "--format=%gs"])?.unwrap_or_default();
+    Ok(out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .enumerate()
+        .map(|(i, l)| StashEntry {
+            index: i,
+            message: l.trim().to_string(),
+        })
+        .collect())
+}
+
+/// 保存当前改动到 stash。`message` 为空用 git 自动生成（WIP on …）。
+/// 无可存改动（干净工作树）时报错并返回原因。
+pub fn stash_push(repo: &Path, message: &str) -> Result<String, GitBridgeError> {
+    if !is_dirty(repo) {
+        return Err(GitBridgeError::Command("没有可保存的改动".into()));
+    }
+    let mut args: Vec<&str> = vec!["stash", "push"];
+    let msg = message.trim();
+    if !msg.is_empty() {
+        args.push("-m");
+        args.push(msg);
+    }
+    Ok(run_git(repo, &args)?.unwrap_or_default())
+}
+
+/// 恢复最近一条 stash 并删除它。
+pub fn stash_pop(repo: &Path) -> Result<String, GitBridgeError> {
+    Ok(run_git(repo, &["stash", "pop"])?.unwrap_or_default())
+}
+
+/// 恢复第 `index` 条 stash 并删除它。
+pub fn stash_pop_index(repo: &Path, index: usize) -> Result<String, GitBridgeError> {
+    let which = format!("stash@{{{index}}}");
+    Ok(run_git(repo, &["stash", "pop", &which])?.unwrap_or_default())
+}
+
+/// 删除第 `index` 条 stash。
+pub fn stash_drop(repo: &Path, index: usize) -> Result<(), GitBridgeError> {
+    let which = format!("stash@{{{index}}}");
+    run_git(repo, &["stash", "drop", &which])?;
+    Ok(())
+}
+
+/// 暂存并提交全部改动（`git add -A` + `git commit -m`）。
+/// 返回 `短hash 标题` 供 UI 展示；提交信息为空或无事可提交时报错。
+pub fn commit_all(repo: &Path, message: &str) -> Result<String, GitBridgeError> {
+    let msg = message.trim();
+    if msg.is_empty() {
+        return Err(GitBridgeError::Command("提交信息不能为空".into()));
+    }
+    run_git(repo, &["add", "-A"])?;
+    run_git(repo, &["commit", "-m", msg])?;
+    let summary = run_git(repo, &["log", "-1", "--format=%h %s"])?.unwrap_or_default();
+    Ok(summary)
 }
 
 /// 在 `repo` 里跑一条无交互 git 命令；成功返回合并后的 stdout+stderr 文本。

@@ -272,6 +272,36 @@ struct ConflictFile {
   - 后端命令不能直接 `invoke` 驱动 UI（绕过 React）→ 必须点真实按钮/最近条目走 App handler；
     且 recent 是 mount 时快照，改完 recents 要重启 app 才刷新
 
+### Phase 6: 分支 / 暂存 / 提交（Git 操作面板，完成，2026-08-14）
+工作空间增强：「非 MVP」迭代里的分支切换/新建、stash、提交对话框先落地。
+- **后端 git-bridge**（✓ 5 个新集成测试，真实 bare remote fixture）：
+  - `list_branches`（`git branch --format=%(refname:short)` + current 标记）、
+    `create_branch`（空名报可读错误）、`switch_branch(name, force)`（`git checkout [-f]`：
+    脏树被拒则分支不变，force 丢弃改动，单测锁定两种行为）
+  - `list_stashes`（`stash list --format=%gs`，index 即 `stash@{n}`）、
+    `stash_push(message)`（干净工作树给「没有可保存的改动」而非 git 原文）、
+    `stash_pop` / `stash_pop_index`、`stash_drop(index)`
+  - `commit_all(message)`（`add -A` + `commit -m`，返回 `短hash 标题`；空信息拒绝）
+  - **顺带修掉一个潜在 bug**：`load_upstream` 曾把「`@{upstream}` 无上游」的 git 非零退出当作
+    致命错误传播——无上游分支（新建分支/新仓库）会让整张状态卡失败；现视为「无上游」，
+    远端 URL 的 config 查询同样容错回退 origin
+- **Tauri 命令**（✓ 8 个注册进 invoke_handler）：list_branches / create_branch /
+  switch_branch / list_stashes / stash_push / stash_pop / stash_drop / commit_all，
+  全部经 `current_workspace_root` 定位仓库
+- **前端**（✓ WorkspaceBar 第二行「分支 / 暂存 / 提交」切换 + 内联面板 `git-panels.tsx`）：
+  - 分支：列表（当前 ✓）、切换 / 强制切换（丢弃改动）、新建、新建并切换；
+    面板懒加载，卸载再开自动重取
+  - 暂存：列表（应用 / 删除，删除弹确认）、保存当前改动（可填说明）
+  - 提交：多行输入（Ctrl+Enter）+ 「提交全部」（toast「已提交 短hash 标题」）
+  - 任一生效后经 `onChanged` 静默刷新状态卡（不影响按钮 busy 态）
+- **真实应用 CDP E2E（✓ PHASE=gitops 全流程 PASS）**：打开工作区（master ↑1 ↓1 · 有改动）→
+  分支面板「新建并切换」feature-gitops（脏改动随切换带过去）→ 暂存保存（工作树干净、列表 1 条）→
+  应用（改动恢复、列表清空）→ 提交全部（`已提交 cce1ce1 gitops: 提交全部改动`）→ 切回 master。
+  git 状态核验：feature-gitops 含该提交、master 未动、工作树干净、stash 空
+- **E2E 脚本加固**：connect() 空白页自动 reload；CDP 轮询体一律只返回布尔（WebView2 的
+  returnByValue 对 DOM 元素或 `__TAURI_INTERNALS__` 深对象报 `Object reference chain is too long`）；
+  面板「初始空态」不是就绪信号，必须等非空行再断言
+
 ## 7. 风险
 
 | 风险 | 缓解 |
@@ -284,14 +314,16 @@ struct ConflictFile {
 
 ## 8. 下一步
 
-Phase 1–5（MVP：三栏 + 多文件 + 保存/退出码协议 + NSIS 安装包 + 自动登记 + 工作空间拉取/推送/冲突解决）已全部完成，
-真实 `git mergetool` 全流程与工作空间四阶段 CDP E2E 均验证通过。
+Phase 1–6（MVP：三栏 + 多文件 + 保存/退出码协议 + NSIS 安装包 + 自动登记 +
+工作空间拉取/推送/冲突解决 + 分支切换/新建、stash、提交面板）已全部完成，
+真实 `git mergetool` 全流程、工作空间四阶段与 gitops 六步 CDP E2E 均验证通过。
 
 后续迭代（非 MVP）：
+- 恢复进行中合并（打开即接管 MERGE_HEAD 状态）、代理/推送配置
 - macOS `.dmg`（同一套代码，补 bundled 前端 + 公证）
 - 拖拽冲突块、批量处理、历史记录
 - 主题切换（浅色）、完整 i18n
-- 工作空间增强：分支切换/新建、stash、提交对话框、恢复进行中合并、代理/推送配置
+- 工作空间增强：暂存时可选带未跟踪文件、逐文件提交、提交历史浏览、检出旧版本
 - Windows ARM / 便携版、非 UTF-8 完整编码、二进制冲突
 
 **仓库**: https://github.com/1540962572/MergeDrag.git
