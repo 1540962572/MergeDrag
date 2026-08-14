@@ -75,25 +75,22 @@ pub fn open_session(state: State<'_, AppState>) -> Result<SessionSnapshot, Strin
 
 #[tauri::command]
 pub fn load_sample(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
-    let local =
-        "fn greet(name: &str) {\n    println!(\"hello\");\n    println!(\"local: {name}\");\n}\n";
-    let remote =
-        "fn greet(name: &str) {\n    println!(\"hello\");\n    println!(\"remote: {name}\");\n}\n";
-    let base = "fn greet(name: &str) {\n    println!(\"hello\");\n    println!(\"{name}\");\n}\n";
+    // 3 处相互独立的冲突（README 的简介/安装/使用三段），对应前端 sample.ts。
+    let (local, remote, base) = sample_trio();
 
-    let doc = three_way(local, remote, Some(base), "src/example.rs".to_string());
+    let doc = three_way(&local, &remote, Some(&base), "README.md".to_string());
     let unresolved = doc.unresolved_count() as u32;
     set_current(&state, doc.clone());
 
     Ok(SessionSnapshot {
         repo_root: None,
         files: vec![ConflictFileDto {
-            path: "src/example.rs".into(),
+            path: "README.md".into(),
             is_binary: false,
             unresolved_count: unresolved,
         }],
         current: Some(doc),
-        message: Some("已加载示例冲突（开发用）".into()),
+        message: Some("已加载示例冲突（3 处，可逐个取左/取右）".into()),
     })
 }
 
@@ -221,6 +218,29 @@ pub fn register_mergetool(_app: tauri::AppHandle) -> Result<String, String> {
 }
 
 // ---- helpers -------------------------------------------------------------
+
+/// 示例冲突三方文本（3 处独立冲突：简介/安装/使用），与前端 sample.ts 保持一致。
+fn sample_trio() -> (String, String, String) {
+    let (mut local, mut remote, mut base) = (String::new(), String::new(), String::new());
+    for (head, l, r, b) in [
+        ("# MergeDrag\n\n## 简介\n\n", "这是一个三方合并工具（本地版）。\n", "这是一个三方合并工具（远端版）。\n", "这是一个 IDEA 风格的三方合并工具。\n"),
+        ("\n## 安装\n\n", "使用 NSIS 安装包。\n", "使用 MSI 安装包。\n", "使用安装包。\n"),
+        ("\n## 使用\n\n", "用 git mergetool 启动（本地）。\n", "用 git mergetool 启动（远端）。\n", "用 git mergetool 启动。\n"),
+    ] {
+        // 标题/段落分隔属于 clean 上下文，冲突行各侧取各自的改法。
+        local.push_str(head);
+        remote.push_str(head);
+        base.push_str(head);
+        local.push_str(l);
+        remote.push_str(r);
+        base.push_str(b);
+    }
+    let tail = "\n## 反馈\n\n欢迎反馈问题。\n";
+    local.push_str(tail);
+    remote.push_str(tail);
+    base.push_str(tail);
+    (local, remote, base)
+}
 
 fn read_text(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))
@@ -392,5 +412,27 @@ mod tests {
         assert_eq!(doc.unresolved_count(), 2, "中间行 + 末尾双方追加");
         let applied = doc.apply();
         assert!(applied.contains("MAIN") && applied.contains("SIDE"));
+    }
+
+    #[test]
+    fn sample_trio_produces_three_conflicts() {
+        let (local, remote, base) = sample_trio();
+        let doc = three_way(&local, &remote, Some(&base), "README.md".to_string());
+        assert_eq!(
+            doc.unresolved_count(),
+            3,
+            "示例应生成 3 处独立冲突：\n{hunks}",
+            hunks = doc
+                .hunks
+                .iter()
+                .map(|h| match h {
+                    merge_core::Hunk::Clean { .. } => "clean".to_string(),
+                    merge_core::Hunk::Conflict { id, decision, .. } => {
+                        format!("conflict#{id}: {decision:?}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 }

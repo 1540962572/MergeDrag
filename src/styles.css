@@ -314,3 +314,53 @@ button.save:disabled {
 button.save:hover:not(:disabled) {
   background: var(--resolved);
 }
+
+/* Monaco 内嵌块操作条：每个未解决冲突块上方一行 ←取左 | 取右→ | 双方 | ✕忽略 */
+.md-block-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  background: #2f2420;
+  border: 1px solid rgba(199, 78, 57, 0.5);
+  border-radius: 3px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+}
+
+.md-block-actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.md-block-actions button:hover {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.md-block-actions .md-w-a:hover {
+  border-color: #4a9eff;
+  color: #bcdaff;
+}
+
+.md-block-actions .md-w-b:hover {
+  border-color: #cd9731;
+  color: #ffe8b8;
+}
+
+.md-block-actions .md-w-both:hover {
+  border-color: #4ecf9a;
+  color: #c8f5e3;
+}
+
+.md-block-actions .md-w-ignore:hover {
+  border-color: #c74e39;
+  color: #ffb3a8;
+}

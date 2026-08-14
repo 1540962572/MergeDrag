@@ -42,7 +42,15 @@ impl AppState {
             .ok_or_else(|| "没有可保存的目标路径".to_string())?;
         // 规范化成真实绝对路径：git mergetool 传的是相对 $MERGED（相对本进程 CWD），
         // 直接写盘没问题，但 repo_rel_of 要按 workdir 反推相对路径，必须用绝对路径。
-        let target = canonical_abs(&target)?;
+        // 目标文件本身可能还不存在（首次保存就是由 persist 创建），
+        // 不能直接 canonicalize 整个路径——改成规范化必然存在的父目录再拼文件名。
+        let target = canonical_abs(&target)
+            .unwrap_or_else(|_| match (target.parent(), target.file_name()) {
+                (Some(dir), Some(name)) => {
+                    canonical_abs(dir).unwrap_or_else(|_| dir.to_path_buf()).join(name)
+                }
+                _ => target.to_path_buf(),
+            });
         std::fs::write(&target, text)
             .map_err(|e| format!("写入 {} 失败: {e}", target.display()))?;
         self.saved.store(true, Ordering::SeqCst);

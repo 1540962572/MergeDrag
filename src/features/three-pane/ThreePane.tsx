@@ -15,6 +15,55 @@ interface ThreePaneProps {
   onManualEdit: (text: string) => void;
 }
 
+/** 每个未解决冲突块上方的一个内嵌操作条（Monaco content widget）。 */
+interface BlockArrowWidget {
+  getId: () => string;
+  getDomNode: () => HTMLElement;
+  getPosition: () => {
+    position: { lineNumber: number; column: number };
+    preference: number[];
+  };
+  dispose: () => void;
+}
+
+function makeBlockWidget(
+  id: string,
+  lineNumber: number,
+  label: string,
+  onAction: (decision: Decision) => void,
+): BlockArrowWidget {
+  // ContentWidgetPositionPreference.ABOVE 在块首行上方插一条半高操作行。
+  const ABOVE = 3;
+  const node = document.createElement("div");
+  node.className = "md-block-actions";
+  node.title = `第 ${label} 处冲突：为本块单独选择内容，互不影响其他块`;
+
+  const add = (text: string, cls: string, decision: Decision, tip: string) => {
+    const b = document.createElement("button");
+    b.className = cls;
+    b.textContent = text;
+    b.title = tip;
+    b.addEventListener("click", () => onAction(decision));
+    node.appendChild(b);
+  };
+  add("← 取左", "md-w-a", { kind: "TakeLocal" }, "本块接受左侧，其他块不受影响");
+  add("取右 →", "md-w-b", { kind: "TakeRemote" }, "本块接受右侧，其他块不受影响");
+  add("双方", "md-w-both", { kind: "TakeBoth", payload: { localFirst: true } }, "本块先左后右都保留");
+  add("✕ 忽略", "md-w-ignore", { kind: "Ignore" }, "本块两边都不要");
+
+  return {
+    getId: () => id,
+    getDomNode: () => node,
+    getPosition: () => ({
+      position: { lineNumber, column: 1 },
+      preference: [ABOVE],
+    }),
+    dispose: () => {
+      node.remove();
+    },
+  };
+}
+
 type MonacoEditor = Parameters<OnMount>[0];
 type MonacoApi = Parameters<OnMount>[1];
 
@@ -79,9 +128,11 @@ export function ThreePane({
 }: ThreePaneProps) {
   const [baseVisible, setBaseVisible] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
+  const [editorReady, setEditorReady] = useState(false);
   const resultRef = useRef<MonacoEditor | null>(null);
   const monacoRef = useRef<MonacoApi | null>(null);
   const decoRef = useRef<string[]>([]);
+  const widgetsRef = useRef<BlockArrowWidget[]>([]);
 
   const blocks = useMemo(
     () => (document ? unresolvedBlocks(document.hunks) : []),
@@ -145,6 +196,37 @@ export function ThreePane({
     }));
     decoRef.current = ed.deltaDecorations(decoRef.current, decorations);
   }, [blocks, activeIdx, resultText, document]);
+
+  // 每个未解决块上方内嵌 ←取左 | 取右→ | 双方 | ✕ 操作条，各块独立决策。
+  useEffect(() => {
+    const ed = resultRef.current;
+    for (const w of widgetsRef.current) {
+      ed?.removeContentWidget(w);
+      w.dispose();
+    }
+    widgetsRef.current = [];
+    if (!ed || !document) return;
+    blocks.forEach((wblock, i) => {
+      const widget = makeBlockWidget(
+        `block-actions-${wblock.id}`,
+        wblock.start + 1,
+        `${i + 1}/${blocks.length}`,
+        (decision) => {
+          setActiveIdx(i);
+          onDecide(wblock.id, decision);
+        },
+      );
+      ed.addContentWidget(widget);
+      widgetsRef.current.push(widget);
+    });
+    return () => {
+      for (const w of widgetsRef.current) {
+        ed.removeContentWidget(w);
+        w.dispose();
+      }
+      widgetsRef.current = [];
+    };
+  }, [blocks, document, editorReady, onDecide]);
 
   if (!document) {
     return (
@@ -297,6 +379,7 @@ export function ThreePane({
               onMount={(ed, monaco) => {
                 resultRef.current = ed;
                 monacoRef.current = monaco;
+                setEditorReady(true);
               }}
               onChange={(v) => {
                 if (v !== undefined) onManualEdit(v);
