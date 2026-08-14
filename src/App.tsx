@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { FileList } from "./features/file-list/FileList";
 import { ThreePane } from "./features/three-pane/ThreePane";
+import { WorkspaceBar } from "./features/workspace/WorkspaceBar";
+import { WorkspaceHome } from "./features/workspace/WorkspaceHome";
 import { SAMPLE_DOCUMENT, SAMPLE_FILES } from "./shared/sample";
 import {
   applyHunks,
@@ -9,8 +12,12 @@ import {
   type Decision,
   type Hunk,
   type MergeDocument,
+  type PullOutcome,
+  type RecentWorkspace,
   type SaveResult,
   type SessionSnapshot,
+  type WorkspaceSnapshot,
+  type WorkspaceStatus,
 } from "./shared/types";
 
 const emptySession: SessionSnapshot = {
@@ -25,8 +32,17 @@ function inTauri(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
+type WsBusy = "idle" | "opening" | "pulling" | "pushing" | "refreshing";
+
 export default function App() {
   const [session, setSession] = useState<SessionSnapshot>(emptySession);
+  // 工作空间：当前打开仓库的状态 + 最近列表 + 拉取/推送结果提示。
+  const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceStatus | null>(
+    null,
+  );
+  const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
+  const [wsBusy, setWsBusy] = useState<WsBusy>("idle");
+  const [wsToast, setWsToast] = useState<string | null>(null);
   // 用户在 Result 面板里手改的内容：一旦手改，整份结果以它为准，
   // 之后任何一次点箭头决策都会清掉，回到 hunk 模型计算的文本。
   const [manualOverride, setManualOverride] = useState<string | null>(null);
@@ -57,7 +73,7 @@ export default function App() {
   }, []);
 
   // On mount: if launched by git mergetool, ask the backend to build a session.
-  // 非 mergetool 启动（空壳）时顺便检查/登记全局 mergetool。
+  // 非 mergetool 启动（空壳）时顺便检查/登记全局 mergetool + 拉最近工作区。
   useEffect(() => {
     if (!inTauri()) return;
     invoke<SessionSnapshot>("open_session")
@@ -68,9 +84,123 @@ export default function App() {
       .catch((e) =>
         setSession((s) => ({ ...s, message: `打开会话失败: ${e}` })),
       );
+    invoke<RecentWorkspace[]>("list_workspaces")
+      .then(setRecentWorkspaces)
+      .catch(() => setRecentWorkspaces([]));
   }, []);
 
+  /** 扫描当前仓库的未合并文件；有冲突且没有打开文件时自动打开第一个。 */
+  const loadConflicts = useCallback(async () => {
+    const s = await invoke<SessionSnapshot>("scan_repo");
+    if (s.files.length > 0) {
+      setSession(
+        await invoke<SessionSnapshot>("open_file", {
+          relPath: s.files[0].path,
+        }),
+      );
+    } else {
+      setSession((prev) => ({ ...s, current: prev.current }));
+    }
+  }, []);
+
+  const openWorkspace = useCallback(
+    async (root: string) => {
+      setWsBusy("opening");
+      setWsToast(null);
+      setNotice(null);
+      try {
+        const snap = await invoke<WorkspaceSnapshot>("open_workspace", {
+          root,
+        });
+        setWorkspaceStatus(snap.status);
+        setRecentWorkspaces(snap.recent);
+        await loadConflicts();
+      } catch (e) {
+        setNotice(`打开工作区失败: ${e}`);
+      }
+      setWsBusy("idle");
+    },
+    [loadConflicts],
+  );
+
+  /** 首页/工作区卡片：「选择文件夹」→ 原生目录选择器 → open_workspace。 */
+  const openFolder = useCallback(async () => {
+    if (!inTauri()) {
+      setNotice("浏览器模式无法选择文件夹。");
+      return;
+    }
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: "选择 Git 工作区文件夹",
+    });
+    if (typeof picked !== "string" || picked.length === 0) return;
+    await openWorkspace(picked);
+  }, [openWorkspace]);
+
+  const refreshWs = useCallback(async () => {
+    setWsBusy("refreshing");
+    setWsToast(null);
+    try {
+      const snap = await invoke<WorkspaceSnapshot>("refresh_workspace");
+      setWorkspaceStatus(snap.status);
+    } catch (e) {
+      setWsToast(`刷新失败: ${e}`);
+    }
+    setWsBusy("idle");
+  }, []);
+
+  const pullWs = useCallback(async () => {
+    setWsBusy("pulling");
+    setWsToast(null);
+    try {
+      const out = await invoke<PullOutcome>("pull_now");
+      setWorkspaceStatus(out.status);
+      setWsToast(
+        out.conflicted
+          ? `拉取产生冲突：\n${out.message}\n请在下方逐个解决后保存。`
+          : out.message || "拉取完成。",
+      );
+      if (out.conflicted) await loadConflicts();
+    } catch (e) {
+      setWsToast(`拉取失败: ${e}`);
+    }
+    setWsBusy("idle");
+  }, [loadConflicts]);
+
+  const pushWs = useCallback(async () => {
+    setWsBusy("pushing");
+    setWsToast(null);
+    try {
+      const msg = await invoke<string>("push_now");
+      setWsToast(msg || "推送完成。");
+      const snap = await invoke<WorkspaceSnapshot>("refresh_workspace");
+      setWorkspaceStatus(snap.status);
+    } catch (e) {
+      setWsToast(`推送失败: ${e}`);
+    }
+    setWsBusy("idle");
+  }, []);
+
+  /** 「解决冲突」按钮：重扫 index，打开冲突文件。 */
+  const resolveConflicts = useCallback(async () => {
+    setWsBusy("refreshing");
+    try {
+      await loadConflicts();
+    } catch (e) {
+      setNotice(`打开冲突文件失败: ${e}`);
+    }
+    setWsBusy("idle");
+  }, [loadConflicts]);
+
   const current: MergeDocument | null = session.current ?? null;
+
+  /** 空壳首页：未开工作区、未通过 mergetool 启动会话时显示。 */
+  const showHome = !workspaceStatus && !current && session.files.length === 0;
+
+  const emptyHint = workspaceStatus
+    ? "工作区已打开，当前没有需要解决的冲突。\n可以在左侧做刷新 / 拉取 / 推送。"
+    : "尚未打开冲突文件。\n请通过 git mergetool 启动、打开工作区，或点击右上角「打开示例冲突」。";
 
   /** 与 Rust 的 unresolved_count() 口径一致：Unresolved 和 Manual 都算未解决。 */
   function countUnresolved(doc: MergeDocument): number {
@@ -304,18 +434,45 @@ export default function App() {
         </div>
       )}
       <div className="app-body">
-        <FileList
-          files={session.files}
-          activePath={current?.fileLabel ?? null}
-          onSelect={openFile}
-        />
-        <ThreePane
-          document={current}
-          resultText={resultText}
-          onDecide={decide}
-          onAcceptAll={acceptAll}
-          onManualEdit={onManualEdit}
-        />
+        {showHome ? (
+          <WorkspaceHome
+            recent={recentWorkspaces}
+            busy={wsBusy === "opening"}
+            notice={notice}
+            onOpenFolder={openFolder}
+            onOpenRecent={openWorkspace}
+            onOpenSample={openSample}
+          />
+        ) : (
+          <>
+            <FileList
+              files={session.files}
+              activePath={current?.fileLabel ?? null}
+              onSelect={openFile}
+              top={
+                workspaceStatus ? (
+                  <WorkspaceBar
+                    status={workspaceStatus}
+                    busy={wsBusy}
+                    toast={wsToast}
+                    onRefresh={refreshWs}
+                    onPull={pullWs}
+                    onPush={pushWs}
+                    onResolveConflicts={resolveConflicts}
+                  />
+                ) : undefined
+              }
+            />
+            <ThreePane
+              document={current}
+              resultText={resultText}
+              onDecide={decide}
+              onAcceptAll={acceptAll}
+              onManualEdit={onManualEdit}
+              emptyHint={emptyHint}
+            />
+          </>
+        )}
       </div>
       <footer className="status-bar">
         <span>{current?.fileLabel ?? "未打开文件"}</span>

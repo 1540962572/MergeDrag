@@ -1,14 +1,18 @@
+import type { ReactNode } from "react";
 import type { ConflictFile } from "../../shared/types";
 
 interface FileListProps {
   files: ConflictFile[];
   activePath: string | null;
   onSelect: (path: string) => void;
+  /** 列表顶部的可选区块（如工作空间状态卡片）。 */
+  top?: ReactNode;
 }
 
-export function FileList({ files, activePath, onSelect }: FileListProps) {
+export function FileList({ files, activePath, onSelect, top }: FileListProps) {
   return (
     <aside className="file-list">
+      {top}
       <h2>冲突文件</h2>
       {files.length === 0 ? (
         <p className="empty-state">

@@ -16,6 +16,8 @@ pub struct AppState {
     pub current: Mutex<Option<MergeDocument>>,
     /// 当前文件保存目标（mergetool 启动时为 --merged；多文件时为工作树路径）。
     pub save_target: Mutex<Option<PathBuf>>,
+    /// 当前打开的工作空间（本地含 .git 的文件夹），空壳启动时使用。
+    pub workspace_root: Mutex<Option<PathBuf>>,
     /// 是否已把最终文本写入磁盘（决定退出码）。
     pub saved: AtomicBool,
 }
@@ -27,6 +29,7 @@ impl AppState {
             launch,
             current: Mutex::new(None),
             save_target: Mutex::new(save_target),
+            workspace_root: Mutex::new(None),
             saved: AtomicBool::new(false),
         }
     }
@@ -44,13 +47,14 @@ impl AppState {
         // 直接写盘没问题，但 repo_rel_of 要按 workdir 反推相对路径，必须用绝对路径。
         // 目标文件本身可能还不存在（首次保存就是由 persist 创建），
         // 不能直接 canonicalize 整个路径——改成规范化必然存在的父目录再拼文件名。
-        let target = canonical_abs(&target)
-            .unwrap_or_else(|_| match (target.parent(), target.file_name()) {
-                (Some(dir), Some(name)) => {
-                    canonical_abs(dir).unwrap_or_else(|_| dir.to_path_buf()).join(name)
-                }
+        let target = canonical_abs(&target).unwrap_or_else(|_| {
+            match (target.parent(), target.file_name()) {
+                (Some(dir), Some(name)) => canonical_abs(dir)
+                    .unwrap_or_else(|_| dir.to_path_buf())
+                    .join(name),
                 _ => target.to_path_buf(),
-            });
+            }
+        });
         std::fs::write(&target, text)
             .map_err(|e| format!("写入 {} 失败: {e}", target.display()))?;
         self.saved.store(true, Ordering::SeqCst);
@@ -96,6 +100,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(args))
         .invoke_handler(tauri::generate_handler![
             commands::open_session,
@@ -106,19 +111,30 @@ pub fn run() {
             commands::open_file,
             commands::ensure_mergetool_registered,
             commands::register_mergetool,
+            // 工作空间
+            commands::open_workspace,
+            commands::refresh_workspace,
+            commands::pull_now,
+            commands::push_now,
+            commands::list_workspaces,
         ])
         // 关闭窗口时按 mergetool 协议定退出码：已保存且全部解决 → 0；否则 → 1。
+        // 非 mergetool 启动（工作空间/示例）不参与该协议，直接退出码 0。
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 let state = app.state::<AppState>();
-                let unresolved = state
-                    .current
-                    .lock()
-                    .map(|g| g.as_ref().map(|d| d.unresolved_count()).unwrap_or(1))
-                    .unwrap_or(1);
-                let saved = state.saved.load(Ordering::SeqCst);
-                let code = exit_code_for(saved, unresolved);
+                let code = if state.launch.is_mergetool_launch() {
+                    let unresolved = state
+                        .current
+                        .lock()
+                        .map(|g| g.as_ref().map(|d| d.unresolved_count()).unwrap_or(1))
+                        .unwrap_or(1);
+                    let saved = state.saved.load(Ordering::SeqCst);
+                    exit_code_for(saved, unresolved)
+                } else {
+                    0
+                };
                 // `app.exit(code)` 在 Windows 上不一定把 code 透传成进程退出码
                 // （run 循环正常结束会返回 Ok(()) → 退出码 0），直接进程退出：
                 // mergetool 协议（trustExitCode）依赖真实退出码，无清理可做。

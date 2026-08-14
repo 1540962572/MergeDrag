@@ -54,6 +54,44 @@ export interface SaveResult {
   warning: string | null;
 }
 
+// ---- workspace (mirror of git-bridge::WorkspaceStatus / commands DTOs) -----
+
+export interface UpstreamInfo {
+  name: string;
+  remoteUrl: string | null;
+  ahead: number;
+  behind: number;
+}
+
+/** Mirror of git-bridge::WorkspaceStatus. */
+export interface WorkspaceStatus {
+  root: string;
+  branch: string | null;
+  upstream: UpstreamInfo | null;
+  merging: boolean;
+  unmergedCount: number;
+  dirty: boolean;
+  summary: string;
+}
+
+export interface RecentWorkspace {
+  path: string;
+  lastOpened: number;
+}
+
+export interface WorkspaceSnapshot {
+  status: WorkspaceStatus | null;
+  recent: RecentWorkspace[];
+  activePath: string | null;
+  message: string | null;
+}
+
+export interface PullOutcome {
+  message: string;
+  status: WorkspaceStatus | null;
+  conflicted: boolean;
+}
+
 /** Render a document to plain text (what `apply()` produces in Rust). */
 export function applyHunks(hunks: Hunk[]): string {
   return hunks

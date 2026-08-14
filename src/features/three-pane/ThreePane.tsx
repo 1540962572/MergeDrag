@@ -13,6 +13,8 @@ interface ThreePaneProps {
   onDecide: (hunkId: number, decision: Decision) => void;
   onAcceptAll: (side: "local" | "remote") => void;
   onManualEdit: (text: string) => void;
+  /** 无文档时的占位提示（工作空间模式文案与 mergetool 模式不同）。 */
+  emptyHint?: string;
 }
 
 /** 每个未解决冲突块上方的一个内嵌操作条（Monaco content widget）。 */
@@ -125,6 +127,7 @@ export function ThreePane({
   onDecide,
   onAcceptAll,
   onManualEdit,
+  emptyHint = "尚未打开冲突文件。\n请通过 git mergetool 启动，或点击右上角「打开示例冲突」。",
 }: ThreePaneProps) {
   const [baseVisible, setBaseVisible] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
@@ -231,9 +234,12 @@ export function ThreePane({
   if (!document) {
     return (
       <div className="empty-state">
-        尚未打开冲突文件。
-        <br />
-        请通过 <code>git mergetool</code> 启动，或点击右上角「打开示例冲突」。
+        {emptyHint.split("\n").map((line, i) => (
+          <span key={i}>
+            {i > 0 && <br />}
+            {line}
+          </span>
+        ))}
       </div>
     );
   }

@@ -138,15 +138,11 @@ pub fn save_merged(state: State<'_, AppState>, text: String) -> Result<SaveResul
     Ok(SaveResult { added, warning })
 }
 
-/// 扫描 `--merged` 所在仓库的所有未合并文件，返回左栏列表。
+/// 扫描当前仓库的所有未合并文件，返回左栏列表。
 #[tauri::command]
 pub fn scan_repo(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
-    let merged = state
-        .launch
-        .merged
-        .as_ref()
-        .ok_or_else(|| "未通过 git mergetool 启动".to_string())?;
-    let root = repo_root_of(merged).ok_or_else(|| "找不到 Git 仓库".to_string())?;
+    let root =
+        repo_root_for_scan(&state).ok_or("未打开 Git 仓库（无工作空间，也非 mergetool 启动）")?;
     let files = scan_files(Path::new(&root))?;
     let current = state.current.lock().map_err(|e| e.to_string())?.clone();
     Ok(SessionSnapshot {
@@ -160,12 +156,8 @@ pub fn scan_repo(state: State<'_, AppState>) -> Result<SessionSnapshot, String> 
 /// 从仓库 index 读取指定冲突文件的三方内容并打开。
 #[tauri::command]
 pub fn open_file(state: State<'_, AppState>, rel_path: String) -> Result<SessionSnapshot, String> {
-    let merged = state
-        .launch
-        .merged
-        .as_ref()
-        .ok_or_else(|| "未通过 git mergetool 启动".to_string())?;
-    let root = repo_root_of(merged).ok_or_else(|| "找不到 Git 仓库".to_string())?;
+    let root =
+        repo_root_for_scan(&state).ok_or("未打开 Git 仓库（无工作空间，也非 mergetool 启动）")?;
     let root = PathBuf::from(&root);
 
     let doc = three_way_from_index(&root, &rel_path)?;
@@ -223,9 +215,24 @@ pub fn register_mergetool(_app: tauri::AppHandle) -> Result<String, String> {
 fn sample_trio() -> (String, String, String) {
     let (mut local, mut remote, mut base) = (String::new(), String::new(), String::new());
     for (head, l, r, b) in [
-        ("# MergeDrag\n\n## 简介\n\n", "这是一个三方合并工具（本地版）。\n", "这是一个三方合并工具（远端版）。\n", "这是一个 IDEA 风格的三方合并工具。\n"),
-        ("\n## 安装\n\n", "使用 NSIS 安装包。\n", "使用 MSI 安装包。\n", "使用安装包。\n"),
-        ("\n## 使用\n\n", "用 git mergetool 启动（本地）。\n", "用 git mergetool 启动（远端）。\n", "用 git mergetool 启动。\n"),
+        (
+            "# MergeDrag\n\n## 简介\n\n",
+            "这是一个三方合并工具（本地版）。\n",
+            "这是一个三方合并工具（远端版）。\n",
+            "这是一个 IDEA 风格的三方合并工具。\n",
+        ),
+        (
+            "\n## 安装\n\n",
+            "使用 NSIS 安装包。\n",
+            "使用 MSI 安装包。\n",
+            "使用安装包。\n",
+        ),
+        (
+            "\n## 使用\n\n",
+            "用 git mergetool 启动（本地）。\n",
+            "用 git mergetool 启动（远端）。\n",
+            "用 git mergetool 启动。\n",
+        ),
     ] {
         // 标题/段落分隔属于 clean 上下文，冲突行各侧取各自的改法。
         local.push_str(head);
@@ -320,6 +327,170 @@ fn scan_files(repo_root: &Path) -> Result<Vec<ConflictFileDto>, String> {
         }
     }
     Ok(out)
+}
+
+// ---- workspace: status / pull / push / recent -------------------------------
+
+/// 最近打开过的工作空间（持久化到 app_data_dir/workspaces.json，最近优先，最多 10 条）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentWorkspace {
+    pub path: String,
+    /// Unix 秒。
+    pub last_opened: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSnapshot {
+    pub status: Option<git_bridge::WorkspaceStatus>,
+    pub recent: Vec<RecentWorkspace>,
+    pub active_path: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullOutcome {
+    pub message: String,
+    pub status: Option<git_bridge::WorkspaceStatus>,
+    pub conflicted: bool,
+}
+
+/// 打开一个工作空间：校验是 git 仓库、设为当前工作区、记入最近列表。
+#[tauri::command]
+pub fn open_workspace(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    root: String,
+) -> Result<WorkspaceSnapshot, String> {
+    let status = git_bridge::repo_status(Path::new(&root)).map_err(|e| e.to_string())?;
+    *state.workspace_root.lock().map_err(|e| e.to_string())? = Some(status.root.clone());
+    let recent = push_recent(&app, &status.root)?;
+    Ok(WorkspaceSnapshot {
+        status: Some(status),
+        recent,
+        active_path: None,
+        message: None,
+    })
+}
+
+/// 刷新当前工作区：先 fetch 更新远端跟踪引用，再读一次状态。
+/// 无远端/离线时 fetch 失败不致命——落后数反映上次 fetch 的结果。
+#[tauri::command]
+pub fn refresh_workspace(state: State<'_, AppState>) -> Result<WorkspaceSnapshot, String> {
+    let root = current_workspace_root(&state)?;
+    let _ = git_bridge::fetch(&root);
+    let status = git_bridge::repo_status(&root).map_err(|e| e.to_string())?;
+    Ok(WorkspaceSnapshot {
+        status: Some(status),
+        recent: vec![],
+        active_path: None,
+        message: None,
+    })
+}
+
+/// `git pull --no-edit`；有冲突时 pull 报错但仍返回状态，UI 据此切到解决冲突视图。
+#[tauri::command]
+pub fn pull_now(state: State<'_, AppState>) -> Result<PullOutcome, String> {
+    let root = current_workspace_root(&state)?;
+    let message = match git_bridge::pull(&root) {
+        Ok(m) => m,
+        Err(e) => e.to_string(),
+    };
+    let status = git_bridge::repo_status(&root).ok();
+    let conflicted = status
+        .as_ref()
+        .map(|s| s.merging || s.unmerged_count > 0)
+        .unwrap_or(false);
+    Ok(PullOutcome {
+        message,
+        status,
+        conflicted,
+    })
+}
+
+/// `git push`。
+#[tauri::command]
+pub fn push_now(state: State<'_, AppState>) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::push(&root).map_err(|e| e.to_string())
+}
+
+/// 最近打开过的工作空间列表。
+#[tauri::command]
+pub fn list_workspaces(app: tauri::AppHandle) -> Result<Vec<RecentWorkspace>, String> {
+    read_recent(&app)
+}
+
+// ---- workspace helpers ------------------------------------------------------
+
+/// 当前仓库根（供 scan/open_file 用）：优先工作空间，其次 mergetool 的 --merged 反推。
+fn repo_root_for_scan(state: &State<'_, AppState>) -> Option<String> {
+    if let Ok(guard) = state.workspace_root.lock() {
+        if let Some(p) = guard.as_ref() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    let merged = state.launch.merged.as_ref()?;
+    repo_root_of(merged)
+}
+
+fn current_workspace_root(state: &State<'_, AppState>) -> Result<PathBuf, String> {
+    state
+        .workspace_root
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| "尚未打开工作区".to_string())
+}
+
+fn recent_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("取 app_data_dir 失败: {e}"))?;
+    Ok(dir.join("workspaces.json"))
+}
+
+fn read_recent(app: &tauri::AppHandle) -> Result<Vec<RecentWorkspace>, String> {
+    let path = recent_file(app)?;
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&text).map_err(|e| format!("解析最近工作区失败: {e}"))
+}
+
+fn push_recent(app: &tauri::AppHandle, root: &Path) -> Result<Vec<RecentWorkspace>, String> {
+    let mut list = read_recent(app)?;
+    let path = root.to_string_lossy().into_owned();
+    list.retain(|w| w.path != path);
+    list.insert(
+        0,
+        RecentWorkspace {
+            path,
+            last_opened: now_unix_seconds(),
+        },
+    );
+    list.truncate(10);
+    let path = recent_file(app)?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("写入最近工作区失败: {e}"))?;
+    Ok(list)
+}
+
+fn now_unix_seconds() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
