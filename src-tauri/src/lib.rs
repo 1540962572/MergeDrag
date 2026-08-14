@@ -126,6 +126,10 @@ pub fn run() {
             commands::stash_pop,
             commands::stash_drop,
             commands::commit_all,
+            commands::list_changes,
+            commands::commit_files,
+            commands::merge_continue,
+            commands::merge_abort,
         ])
         // 关闭窗口时按 mergetool 协议定退出码：已保存且全部解决 → 0；否则 → 1。
         // 非 mergetool 启动（工作空间/示例）不参与该协议，直接退出码 0。

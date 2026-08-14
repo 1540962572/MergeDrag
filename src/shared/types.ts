@@ -104,6 +104,13 @@ export interface StashEntry {
   message: string;
 }
 
+/** Mirror of git-bridge::ChangeEntry（提交面板勾选用）。 */
+export interface ChangeEntry {
+  path: string;
+  /** M 修改 / A 新增 / D 删除 / R 重命名 / ? 未跟踪 */
+  status: string;
+}
+
 /** Render a document to plain text (what `apply()` produces in Rust). */
 export function applyHunks(hunks: Hunk[]): string {
   return hunks

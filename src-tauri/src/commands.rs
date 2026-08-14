@@ -459,14 +459,16 @@ pub fn list_stashes(state: State<'_, AppState>) -> Result<Vec<git_bridge::StashE
 }
 
 /// 保存改动到 stash（message 可空，空则用 git 自动生成的 WIP on …）。
+/// `include_untracked` 为 true 时未跟踪文件也一并保存（`git stash push -u`）。
 #[tauri::command]
 pub fn stash_push(
     state: State<'_, AppState>,
     message: Option<String>,
+    include_untracked: Option<bool>,
 ) -> Result<String, String> {
     let root = current_workspace_root(&state)?;
     let msg = message.unwrap_or_default();
-    git_bridge::stash_push(&root, &msg).map_err(|e| e.to_string())
+    git_bridge::stash_push(&root, &msg, include_untracked.unwrap_or(false)).map_err(|e| e.to_string())
 }
 
 /// 恢复第 `index` 条 stash（缺省 0 = 最近一条）并从列表移除。返回 git 输出。
@@ -493,6 +495,38 @@ pub fn stash_drop(state: State<'_, AppState>, index: usize) -> Result<String, St
 pub fn commit_all(state: State<'_, AppState>, message: String) -> Result<String, String> {
     let root = current_workspace_root(&state)?;
     git_bridge::commit_all(&root, &message).map_err(|e| e.to_string())
+}
+
+/// 列出全部未提交改动（提交面板勾选用，含未跟踪/删除/重命名）。
+#[tauri::command]
+pub fn list_changes(state: State<'_, AppState>) -> Result<Vec<git_bridge::ChangeEntry>, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::list_changes(&root).map_err(|e| e.to_string())
+}
+
+/// 只暂存并提交选中的文件。重命名路径（`旧 -> 新`）提交时两边都会 add。
+#[tauri::command]
+pub fn commit_files(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    message: String,
+) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::commit_files(&root, paths, &message).map_err(|e| e.to_string())
+}
+
+/// 完成进行中的合并（`git merge --continue`）。要求所有冲突已解决，否则报可读错误。
+#[tauri::command]
+pub fn merge_continue(state: State<'_, AppState>) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::merge_continue(&root).map_err(|e| e.to_string())
+}
+
+/// 放弃进行中的合并（`git merge --abort`），回到合并前状态。
+#[tauri::command]
+pub fn merge_abort(state: State<'_, AppState>) -> Result<String, String> {
+    let root = current_workspace_root(&state)?;
+    git_bridge::merge_abort(&root).map_err(|e| e.to_string())
 }
 
 // ---- workspace helpers ------------------------------------------------------

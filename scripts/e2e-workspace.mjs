@@ -9,6 +9,15 @@
 //   PHASE=gitops  脚本：打开工作区（bash 已准备：master + data.txt 一段未提交改动）→
 //                      分支面板新建并切换 feature-gitops → 暂存保存（工作树干净、列表 1 条）→
 //                      应用（改动恢复）→ 提交面板提交全部（toast「已提交」）→ 分支面板切回 master
+//   PHASE=gitops2 脚本：gitops 进阶（bash 已准备：master + data.txt 改动 + untracked2.txt 未跟踪）→
+//                      暂存勾选「连同未跟踪」保存（工作树干净、untracked2 消失、列表 1 条）→
+//                      应用（含未跟踪文件一并恢复）→ 提交面板逐文件：只勾 data.txt 提交选中 →
+//                      剩余 1 项（untracked2 仍在）→ 提交全部收尾
+//   PHASE=mergeops 脚本：合并收尾（bash 已准备：master 上 merge 失败、data.txt 冲突 1 个）→
+//                      卡片见「解决冲突 (1)」→ 逐块取左 + 保存 → 刷新 → 见「完成合并/放弃合并」→
+//                      点「完成合并」→ 合并结束（无合并中、MERGE_HEAD 消失、左栏清空）
+//   PHASE=mergeops-abort 脚本：放弃合并（bash 另备一个冲突）→ 同流程到按钮出现 →
+//                      点「放弃合并」（confirm 由脚本 stub 掉）→ 合并状态消失、工作树回合并前
 //
 // 说明：open_workspace 等后端命令不在脚本里直接 invoke —— 那会绕过 React 状态。
 //      必须驱动真实 UI（点按钮 / 点最近条目）让 App.tsx 的 handler 去调命令。
@@ -463,6 +472,308 @@ async function phaseGitOps(cdp) {
   log("切回 master →", JSON.stringify(card3));
 }
 
+// 把 window.confirm stub 成直接通过（合并面板/放弃合并等场景，CDP 里原生对话框会阻塞且难自动化）。
+const stubConfirm = `(() => { window.confirm = () => true; })()`;
+
+/** 打开最近工作区（从首页 recent 列表点 work），返回读到的卡片。 */
+async function openWorkRecent(cdp) {
+  if (await cdp.eval(`!!document.querySelector('.workspace-card')`)) {
+    log("已在工作区视图，reload 回首页…");
+    await cdp.send("Page.reload", { ignoreCache: true });
+    await sleep(2000);
+  }
+  await cdp.eval(pollFor(`document.querySelectorAll('.home-recent li').length > 0`, 20_000));
+  await cdp.eval(`(() => {
+      const lis = Array.from(document.querySelectorAll('.home-recent li'));
+      const li = lis.find((x) => (x.textContent || '').includes('work'));
+      if (!li) throw new Error('home-recent 里找不到 work 条目: ' + lis.map((x) => x.textContent.trim()).join(' | '));
+      li.click();
+    })()`);
+  return cdp.eval(pollFor(`${call(readCard)} && ${call(readCard)}`, 20_000));
+}
+
+/** 暂存面板：输入说明 + 勾选未跟踪 + 保存，返回新卡片。 */
+async function stashSave(cdp, message, includeUntracked) {
+  await cdp.eval(pollFor(`!!document.querySelector('.ws-panel input')`, 10_000));
+  if (includeUntracked) {
+    await cdp.eval(`(() => {
+      const box = document.querySelector('.ws-stash-u input');
+      if (!box) throw new Error('找不到未跟踪勾选框');
+      box.click();
+      if (!box.checked) throw new Error('勾选框点击后未选中');
+    })()`);
+  }
+  await cdp.eval(setValExpr(`document.querySelector('.ws-panel input')`, message));
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-panel button')).find((b) => b.textContent.trim() === '保存')`,
+    "保存 stash",
+  );
+}
+
+/** 提交面板：点击 .ws-cchk 中名字含 needle 的复选框。 */
+function checkChangeCb(needle) {
+  return `(() => {
+    const li = Array.from(document.querySelectorAll('.ws-plist li')).find(
+      (l) => (l.querySelector('.ws-bname')?.textContent || '').includes('${needle}'),
+    );
+    if (!li) throw new Error('找不到改动项 ' + ${JSON.stringify(needle)});
+    const input = li.querySelector('.ws-cchk input');
+    input.click();
+    if (!input.checked) throw new Error('勾选后未选中');
+  })()`;
+}
+
+/** 返回提交面板当前改动列表（路径 -> 状态徽标）。 */
+const readChanges = `
+  () => {
+    const rows = Array.from(document.querySelectorAll('.ws-plist li'))
+      .filter((li) => !li.classList.contains('empty'))
+      .map((li) => ({
+        path: li.querySelector('.ws-bname')?.textContent || '',
+        badge: li.querySelector('.ws-cbadge')?.textContent || '',
+      }));
+    return rows.length > 0 ? rows : null;
+  }`;
+
+async function phaseGitOps2(cdp) {
+  // 前置（外层 bash 已准备）：work 干净 master + data.txt 有未提交改动 + untracked2.txt 未跟踪。
+  const card0 = await openWorkRecent(cdp);
+  log("打开工作区 →", JSON.stringify(card0));
+  if (card0.branch !== "master") throw new Error(`期望 master，实际 ${card0.branch}`);
+  if (!card0.summary.includes("有改动")) {
+    throw new Error(`预期 work 有已跟踪改动（dirty），summary: ${card0.summary}`);
+  }
+
+  // 1) 暂存面板：勾选「连同未跟踪」保存 → 工作树干净 + untracked2 从磁盘消失。
+  await clickButton(cdp, toolBtn("暂存"), "暂存");
+  await stashSave(cdp, "gitops2 保存", true);
+  const afterSave = await cdp.eval(
+    pollFor(`(() => {
+      const c = ${call(readCard)};
+      const rows = document.querySelectorAll('.ws-plist li:not(.empty)').length;
+      if (!c || c.branch !== 'master') return null;
+      const clean = !!c.summary && !c.summary.includes('有改动');
+      return clean && rows === 1 && (c.toast || '').length ? { summary: c.summary, toast: c.toast, rows } : null;
+    })()`, 15_000, 400),
+  );
+  log("stash -u 保存后 →", JSON.stringify(afterSave));
+  // 磁盘验证：-u 时未跟踪文件应从工作树移走（node 进程在同一台机器上直接读文件系统）。
+  const u2 = path.join(APP_ROOT, "untracked2.txt");
+  if (fs.existsSync(u2)) {
+    throw new Error("保存且勾选未跟踪后，untracked2.txt 应被 stash 移走，但仍在磁盘上");
+  }
+  await shot(cdp, "0-stash-u-saved");
+
+  // 2) 应用 → 已跟踪改动 + 未跟踪文件一并恢复。
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-plist li button')).find((b) => b.textContent.trim() === '应用')`,
+    "应用 stash",
+  );
+  await cdp.eval(
+    pollFor(`(() => {
+      const c = ${call(readCard)};
+      const rows = document.querySelectorAll('.ws-plist li:not(.empty)').length;
+      return c && c.branch === 'master' && (c.summary || '').includes('有改动') && rows === 0 ? c : null;
+    })()`, 15_000, 400),
+  );
+  if (!fs.existsSync(u2)) {
+    throw new Error("应用 stash 后 untracked2.txt 应恢复，但磁盘上不存在");
+  }
+  log("应用后：untracked2.txt 已恢复、列表清空");
+
+  // 3) 提交面板：逐文件勾选，只提交 data.txt。
+  await clickButton(cdp, toolBtn("提交"), "提交");
+  // 等 list_changes 返回（初始空态不是就绪信号）。
+  await cdp.eval(
+    pollFor(`document.querySelectorAll('.ws-plist li:not(.empty)').length >= 2`, 10_000),
+  );
+  const changes0 = await cdp.eval(pollFor(call(readChanges)));
+  log("改动列表 →", JSON.stringify(changes0));
+  if (changes0.length !== 2) throw new Error(`期望 2 项改动: ${JSON.stringify(changes0)}`);
+  await shot(cdp, "1-changes");
+
+  await cdp.eval(checkChangeCb("data.txt"));
+  const header = await cdp.eval(
+    pollFor(`(() => {
+      const t = document.querySelector('.ws-panel-note')?.textContent ?? '';
+      return t.includes('1/2') ? t : null;
+    })()`, 10_000),
+  );
+  log("勾选后面板头 →", header);
+  if (!header.includes("已勾选 1/2")) throw new Error(`勾选 1 项后头部文字不符: ${header}`);
+
+  await cdp.eval(setValExpr(`document.querySelector('.ws-commit-input')`, "gitops2: 只提交 data.txt"));
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-panel button')).find((b) => b.textContent.trim() === '提交选中 (1)')`,
+    "提交选中",
+  );
+  const afterPartial = await cdp.eval(
+    pollFor(`(() => {
+      const rows = Array.from(document.querySelectorAll('.ws-plist li')).filter((li) => !li.classList.contains('empty'));
+      const toast = document.querySelector('.ws-toast')?.textContent ?? '';
+      if (rows.length === 1 && toast.includes('已提交')) {
+        return { path: rows[0].querySelector('.ws-bname')?.textContent || '', toast };
+      }
+      return null;
+    })()`, 15_000, 400),
+  );
+  log("逐文件提交后 →", JSON.stringify(afterPartial));
+  if (afterPartial.path !== "untracked2.txt") {
+    throw new Error(`提交选中后应只剩 untracked2.txt，实际: ${afterPartial.path}`);
+  }
+  // data.txt 的改动进 HEAD 后，工作树还剩未跟踪文件：磁盘上还应存在。
+  if (!fs.existsSync(u2)) {
+    throw new Error("逐文件提交 data.txt 后，untracked2.txt 不应被提交，磁盘上应仍在");
+  }
+  await shot(cdp, "2-partial-committed");
+
+  // 4) 提交全部收尾 → 干净。（上一次提交成功后消息框被清空，先重新输入。）
+  await cdp.eval(setValExpr(`document.querySelector('.ws-commit-input')`, "gitops2: 提交剩余"));
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-panel button')).find((b) => b.textContent.trim() === '提交全部')`,
+    "提交全部",
+  );
+  const finalCard = await cdp.eval(
+    pollFor(`(() => {
+      const c = ${call(readCard)};
+      const rows = document.querySelectorAll('.ws-plist li:not(.empty)').length;
+      if (!c) return null;
+      const clean = !!c.summary && !c.summary.includes('有改动');
+      return clean && rows === 0 && (c.toast || '').includes('已提交') ? c : null;
+    })()`, 15_000, 400),
+  );
+  log("全部提交后 →", JSON.stringify(finalCard));
+  await shot(cdp, "3-all-committed");
+}
+
+/** 从 index 打开工作区并进入冲突解决流程：等卡片出现「解决冲突 (N)」。 */
+async function openWorkInMerge(cdp) {
+  const card0 = await openWorkRecent(cdp);
+  log("打开合并中的工作区 →", JSON.stringify(card0));
+  if (!card0.summary.includes("合并中")) throw new Error(`期望合并中，summary: ${card0.summary}`);
+  if (!card0.summary.includes("1 个冲突")) throw new Error(`期望 1 个冲突，summary: ${card0.summary}`);
+  const hasResolve = (card0.ops || []).some((t) => t.includes("解决冲突"));
+  if (!hasResolve) throw new Error(`未找到解决冲突按钮: ${JSON.stringify(card0.ops)}`);
+  // 三栏打开冲突文件并出现内嵌操作条。
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-ops button')).find((b) => b.textContent.includes('解决冲突'))`,
+    "解决冲突",
+  );
+  await cdp.eval(pollFor(`document.querySelectorAll('.md-block-actions').length > 0`, 15_000));
+  const pane = await cdp.eval(pollFor(call(readPane)));
+  log("三栏 →", JSON.stringify(pane));
+}
+
+/** 逐个内嵌块「← 取左」，然后保存 → 文件列表已解决。 */
+async function resolveAllTakeLeftAndSave(cdp) {
+  while (true) {
+    const left = await cdp.eval(`(document.querySelector('.md-block-actions .md-w-a') !== null)`);
+    if (!left) break;
+    await clickButton(cdp, `document.querySelector('.md-block-actions .md-w-a')`, "内嵌取左");
+    await sleep(600);
+  }
+  await clickButton(cdp, `document.querySelector('.app-header button.save')`, "保存");
+  await cdp.eval(
+    pollFor(`(() => {
+      const st = document.querySelector('.file-list li .status')?.textContent?.trim();
+      return st === '已解决' ? st : null;
+    })()`, 15_000, 400),
+  );
+}
+
+/** 等卡片出现「完成合并 / 放弃合并」两个按钮（保存 + 刷新后 unmerged==0）。 */
+async function waitFinalizeButtons(cdp) {
+  return cdp.eval(
+    pollFor(`(() => {
+      const c = ${call(readCard)};
+      if (!c || !c.summary || c.summary.includes('个冲突')) return null;
+      const t = (c.ops || []).join('|');
+      return t.includes('完成合并') && t.includes('放弃合并') ? c : null;
+    })()`, 20_000, 400),
+  );
+}
+
+async function phaseMergeOps(cdp) {
+  // 前置（外层 bash 已准备）：master 上 merge 失败，data.txt 冲突（MERGE_HEAD + 1 unmerged）。
+  const card0 = await openWorkInMerge(cdp);
+  await shot(cdp, "0-merged-conflict");
+
+  // 全部取左 + 保存 → git add → 卡片 unmerged==0；刷新后出现完成合并/放弃合并。
+  await resolveAllTakeLeftAndSave(cdp);
+  // 工作区卡片基于 git index，保存（git add）后刷新才反映。
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-ops button')).find((b) => b.textContent.includes('刷新'))`,
+    "刷新",
+  );
+  const finalize = await waitFinalizeButtons(cdp);
+  log("待收尾卡片 →", JSON.stringify(finalize));
+  await shot(cdp, "1-finalize-buttons");
+
+  // 点击「完成合并」→ 合并结束：无合并中、MERGE_HEAD 消失、左栏无冲突文件。
+  await cdp.eval(stubConfirm);
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-ops button')).find((b) => b.textContent.trim() === '完成合并')`,
+    "完成合并",
+  );
+  const done = await cdp.eval(
+    pollFor(`(() => {
+      const c = ${call(readCard)};
+      if (!c || !c.summary) return null;
+      const files = document.querySelectorAll('.file-list li').length;
+      return !c.summary.includes('合并中') && (c.toast || '').includes('合并完成') && files === 0 ? c : null;
+    })()`, 20_000, 400),
+  );
+  log("完成合并后 →", JSON.stringify(done));
+  const mergeHead = path.join(APP_ROOT, ".git", "MERGE_HEAD");
+  if (fs.existsSync(mergeHead)) throw new Error("完成合并后 .git/MERGE_HEAD 应被清除");
+  await shot(cdp, "2-merged");
+}
+
+async function phaseMergeOpsAbort(cdp) {
+  // 前置（外层 bash 另备一个冲突）：master 上 merge 失败，data.txt 冲突。
+  await openWorkInMerge(cdp);
+
+  await resolveAllTakeLeftAndSave(cdp);
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-ops button')).find((b) => b.textContent.includes('刷新'))`,
+    "刷新",
+  );
+  const finalize = await waitFinalizeButtons(cdp);
+  log("待收尾卡片 →", JSON.stringify(finalize));
+
+  // 放弃合并（confirm stub 为直接通过）→ 合并状态消失，工作树回合并前。
+  await cdp.eval(stubConfirm);
+  await clickButton(
+    cdp,
+    `Array.from(document.querySelectorAll('.ws-ops button')).find((b) => b.textContent.trim() === '放弃合并')`,
+    "放弃合并",
+  );
+  const aborted = await cdp.eval(
+    pollFor(`(() => {
+      const c = ${call(readCard)};
+      if (!c || !c.summary) return null;
+      const t = (c.ops || []).join('|');
+      return !c.summary.includes('合并中') && !t.includes('放弃合并') && (c.toast || '').includes('放弃') ? c : null;
+    })()`, 20_000, 400),
+  );
+  log("放弃合并后 →", JSON.stringify(aborted));
+  if (fs.existsSync(path.join(APP_ROOT, ".git", "MERGE_HEAD"))) {
+    throw new Error("放弃合并后 .git/MERGE_HEAD 应被清除");
+  }
+  // 工作树内容应回到合并前（bash 前置写入的「PART3_WORK」基线）。
+  const data = fs.readFileSync(path.join(APP_ROOT, "data.txt"), "utf8");
+  if (!data.includes("PART3_WORK")) throw new Error(`abort 后 data.txt 应为合并前内容: ${data}`);
+  await shot(cdp, "3-aborted");
+}
+
 async function main() {
   const cdp = await connect();
   try {
@@ -470,6 +781,9 @@ async function main() {
     else if (PHASE === "pull") await phasePull(cdp);
     else if (PHASE === "conflict") await phaseConflict(cdp);
     else if (PHASE === "gitops") await phaseGitOps(cdp);
+    else if (PHASE === "gitops2") await phaseGitOps2(cdp);
+    else if (PHASE === "mergeops") await phaseMergeOps(cdp);
+    else if (PHASE === "mergeops-abort") await phaseMergeOpsAbort(cdp);
     else await phaseOpen(cdp);
     log("PASS");
   } finally {

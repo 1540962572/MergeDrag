@@ -574,6 +574,69 @@ button.danger {
   font-size: 11px;
 }
 
+/* 逐文件提交：勾选列表 + 状态徽标 */
+.ws-cchk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+
+.ws-cchk input {
+  flex-shrink: 0;
+}
+
+.ws-cbadge {
+  flex-shrink: 0;
+  min-width: 14px;
+  text-align: center;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 3px;
+  color: #0d1117;
+  font-weight: 600;
+}
+
+.ws-cbadge.s-m {
+  background: #e3b341;
+}
+.ws-cbadge.s-a {
+  background: #4ec05e;
+}
+.ws-cbadge.s-d {
+  background: #e0624b;
+}
+.ws-cbadge.s-r {
+  background: #6f9fe0;
+}
+.ws-cbadge.s-u {
+  background: #8a93a0;
+}
+
+.ws-cselall {
+  margin-top: 4px;
+  font-size: 11px;
+  padding: 1px 8px;
+}
+
+/* 暂存面板：连同未跟踪文件的勾选 */
+.ws-stash-u {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ws-stash-u input {
+  flex-shrink: 0;
+}
+
 .home-pane {
   flex: 1;
   display: flex;

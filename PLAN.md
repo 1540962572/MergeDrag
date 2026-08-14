@@ -302,6 +302,39 @@ struct ConflictFile {
   returnByValue 对 DOM 元素或 `__TAURI_INTERNALS__` 深对象报 `Object reference chain is too long`）；
   面板「初始空态」不是就绪信号，必须等非空行再断言
 
+### Phase 7: 合并收尾 / 暂存带未跟踪 / 逐文件提交（完成，2026-08-14）
+承接 Phase 6：合并冲突解决后的「完成合并 / 放弃合并」收尾、stash 可选带未跟踪文件、
+提交面板从「一键全提交」升级为逐文件勾选提交。
+- **后端 git-bridge**（✓ 集成测试 14 个函数级通过，含 5 个新增）：
+  - `merge_continue`：前置校验 MERGE_HEAD 存在 + **index 无未合并文件**，否则给「还有未解决的冲突文件」
+    而非 git 原文；收尾为合并提交（`git merge --continue`）
+  - `merge_abort`：`git merge --abort`，回合并前工作树（单测锁定 MERGE_HEAD 清除 + porcelain 干净 + 内容复原）
+  - `list_changes`：`git status --porcelain` 解析成 `(路径, M/A/D/R/?)`；**修了一个隐蔽切片 bug**——
+    `run_git` 对整段 stdout 做 `.trim()` 会把首行状态列 ` M xxx` 的前导空格吃掉，
+    导致路径从第 4 个字符切起而丢首字符（表现为 `data.txt` → `ata.txt`）；
+    新增 `run_git_aligned`（只剥行尾换行、不动行首空白）专供列表/对齐文本用
+  - `commit_files(paths, message)`：只暂存并提交勾选文件；重命名路径（`旧 -> 新`）自动拆两边一并 add
+  - `stash_push(message, include_untracked)`：`-u` 时未跟踪文件也进 stash（单测验证两种语义）
+- **Tauri 命令**（✓ 注册进 invoke_handler）：list_changes / commit_files / merge_continue / merge_abort；
+  stash_push 增加 `includeUntracked`
+- **前端**：
+  - WorkspaceBar：`merging && unmergedCount==0` 时「解决冲突」让位为「完成合并」+「放弃合并」
+    （放弃合并先 confirm），经 App handler 调命令后刷新状态卡 + 重扫左栏
+  - Stash 面板：保存行下加「连同未跟踪文件（git stash push -u）」勾选框
+  - 提交面板：进入即加载 `list_changes`，逐文件 checkbox 列表（改/新/删/移/未跟踪 徽标）+ 全选 +
+    「提交选中 (N)」（`commit_files`）+ 保留「提交全部」兜底；提交成功后清空选择并重载列表
+- **真实应用 CDP E2E（✓ 三个新阶段全 PASS）**：
+  - `gitops2`：勾选 -u 保存 → 工作树干净且磁盘上未跟踪文件消失 → 应用一并恢复 →
+    只勾 data.txt 提交选中（toast `已提交 8139b77 gitops2: 只提交 data.txt`、列表剩 untracked2.txt）→
+    提交全部收尾
+  - `mergeops`：双端改同一行制造冲突 → 卡片「合并中 · 1 个冲突」+ 解决冲突(1) → 三栏逐块取左 + 保存 →
+    刷新后卡片出现「完成合并 / 放弃合并」→ 点完成合并 → toast `合并完成：[master f878b6c] ...`、
+    无合并中、`.git/MERGE_HEAD` 清除、左栏清空
+  - `mergeops-abort`：同流程到按钮出现 → 点放弃合并（confirm 由脚本 stub）→ 合并状态消失、
+    MERGE_HEAD 清除、data.txt 回合并前内容
+  - 关键认知写进脚本：三栏决策只改前端 hunk 状态，**工作区卡片跟随 git index**（保存后 git add
+    才清零 unmerged），所以「保存 → 刷新 → 完成合并按钮出现」是真实用户序列
+
 ## 7. 风险
 
 | 风险 | 缓解 |
@@ -314,16 +347,17 @@ struct ConflictFile {
 
 ## 8. 下一步
 
-Phase 1–6（MVP：三栏 + 多文件 + 保存/退出码协议 + NSIS 安装包 + 自动登记 +
-工作空间拉取/推送/冲突解决 + 分支切换/新建、stash、提交面板）已全部完成，
-真实 `git mergetool` 全流程、工作空间四阶段与 gitops 六步 CDP E2E 均验证通过。
+Phase 1–7（MVP：三栏 + 多文件 + 保存/退出码协议 + NSIS 安装包 + 自动登记 +
+工作空间拉取/推送/冲突解决 + 分支切换/新建、stash、提交面板 +
+合并收尾、暂存带未跟踪、逐文件提交）已全部完成，真实 `git mergetool` 全流程、
+工作空间四/六步与 gitops2 / mergeops / mergeops-abort CDP E2E 均验证通过。
 
 后续迭代（非 MVP）：
 - 恢复进行中合并（打开即接管 MERGE_HEAD 状态）、代理/推送配置
 - macOS `.dmg`（同一套代码，补 bundled 前端 + 公证）
 - 拖拽冲突块、批量处理、历史记录
 - 主题切换（浅色）、完整 i18n
-- 工作空间增强：暂存时可选带未跟踪文件、逐文件提交、提交历史浏览、检出旧版本
+- 工作空间增强：提交历史浏览、检出旧版本、rebase 流程
 - Windows ARM / 便携版、非 UTF-8 完整编码、二进制冲突
 
 **仓库**: https://github.com/1540962572/MergeDrag.git

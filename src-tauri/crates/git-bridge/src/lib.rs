@@ -321,10 +321,16 @@ fn index_unmerged_count(root: &Path) -> usize {
 
 /// 是否有未提交改动（忽略未跟踪 `??` 文件）。
 fn is_dirty(root: &Path) -> bool {
+    has_changes(root, false)
+}
+
+/// 是否有可 stash 的改动：`include_untracked` 为 true 时未跟踪文件也算。
+fn has_changes(root: &Path, include_untracked: bool) -> bool {
     let Ok(Some(out)) = run_git(root, &["status", "--porcelain"]) else {
         return false;
     };
-    out.lines().any(|l| !l.starts_with("??"))
+    out.lines()
+        .any(|l| include_untracked || !l.starts_with("??"))
 }
 
 /// 拉取（`git pull --no-edit`）。有冲突时 git 会失败 → Err 带回冲突标记。
@@ -422,12 +428,20 @@ pub fn list_stashes(repo: &Path) -> Result<Vec<StashEntry>, GitBridgeError> {
 }
 
 /// 保存当前改动到 stash。`message` 为空用 git 自动生成（WIP on …）。
-/// 无可存改动（干净工作树）时报错并返回原因。
-pub fn stash_push(repo: &Path, message: &str) -> Result<String, GitBridgeError> {
-    if !is_dirty(repo) {
+/// `include_untracked` 为 true 时未跟踪文件也一并保存（`git stash push -u`）。
+/// 无可存改动（干净工作树，或仅剩未跟踪文件而未开启 -u）时报可读错误。
+pub fn stash_push(
+    repo: &Path,
+    message: &str,
+    include_untracked: bool,
+) -> Result<String, GitBridgeError> {
+    if !has_changes(repo, include_untracked) {
         return Err(GitBridgeError::Command("没有可保存的改动".into()));
     }
     let mut args: Vec<&str> = vec!["stash", "push"];
+    if include_untracked {
+        args.push("-u");
+    }
     let msg = message.trim();
     if !msg.is_empty() {
         args.push("-m");
@@ -467,8 +481,127 @@ pub fn commit_all(repo: &Path, message: &str) -> Result<String, GitBridgeError> 
     Ok(summary)
 }
 
-/// 在 `repo` 里跑一条无交互 git 命令；成功返回合并后的 stdout+stderr 文本。
+// ---- workspace: 收尾进行中的合并 / 逐文件提交 --------------------------------
+
+/// 完成进行中的合并（`git merge --continue`，用 git 自动生成的合并信息）。
+/// 要求所有冲突已解决（无未合并文件）；不在合并中时报可读错误。
+pub fn merge_continue(repo: &Path) -> Result<String, GitBridgeError> {
+    if !git_dir_entry_exists(repo, &["rev-parse", "--git-path", "MERGE_HEAD"]) {
+        return Err(GitBridgeError::Command("当前没有进行中的合并".into()));
+    }
+    if index_unmerged_count(repo) > 0 {
+        return Err(GitBridgeError::Command(
+            "还有未解决的冲突文件，请先解决后再继续合并".into(),
+        ));
+    }
+    Ok(run_git(repo, &["merge", "--continue"])?.unwrap_or_default())
+}
+
+/// 放弃进行中的合并（`git merge --abort`，回到合并前状态）。
+pub fn merge_abort(repo: &Path) -> Result<String, GitBridgeError> {
+    if !git_dir_entry_exists(repo, &["rev-parse", "--git-path", "MERGE_HEAD"]) {
+        return Err(GitBridgeError::Command("当前没有进行中的合并".into()));
+    }
+    Ok(run_git(repo, &["merge", "--abort"])?.unwrap_or_default())
+}
+
+/// 一条工作树改动（提交面板勾选用）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeEntry {
+    /// 仓库相对路径。重命名显示为 `旧 -> 新`，提交时两边都会 add。
+    pub path: String,
+    /// 状态码字母：M 修改 / A 新增 / D 删除 / R 重命名 / ? 未跟踪
+    pub status: String,
+}
+
+/// 列出所有未提交改动（`git status --porcelain`）。
+pub fn list_changes(repo: &Path) -> Result<Vec<ChangeEntry>, GitBridgeError> {
+    let out = run_git_aligned(repo, &["status", "--porcelain"])?.unwrap_or_default();
+    Ok(out
+        .lines()
+        .filter(|l| l.len() >= 4)
+        .map(|l| {
+            // 形如 ` M path` / `?? path` / `R  old -> new`；第 4 个字符起是路径。
+            let code = &l[0..2];
+            let path = l[3..].trim();
+            // 工作树变化优先于暂存变化：取代码中「非空格」的那个字母。
+            let status = {
+                let staged = code.chars().next().unwrap_or(' ');
+                let work = code.chars().nth(1).unwrap_or(' ');
+                if work != ' ' {
+                    work
+                } else {
+                    staged
+                }
+            }
+            .to_string();
+            ChangeEntry {
+                path: path.to_string(),
+                status,
+            }
+        })
+        .collect())
+}
+
+/// 只暂存并提交选中的文件（`git add <paths...>` + `git commit -m`）。
+/// 重命名路径（`旧 -> 新`）会拆成两个路径一起 add。返回 `短hash 标题`。
+pub fn commit_files(
+    repo: &Path,
+    paths: Vec<String>,
+    message: &str,
+) -> Result<String, GitBridgeError> {
+    let msg = message.trim();
+    if msg.is_empty() {
+        return Err(GitBridgeError::Command("提交信息不能为空".into()));
+    }
+    // 展开重命名条目，并去重。
+    let mut expanded: Vec<String> = Vec::new();
+    for p in &paths {
+        if p.contains(" -> ") {
+            let parts: Vec<&str> = p.split(" -> ").collect();
+            for part in &parts {
+                let s = part.trim().to_string();
+                if !expanded.contains(&s) {
+                    expanded.push(s);
+                }
+            }
+        } else {
+            let s = p.trim().to_string();
+            if !expanded.contains(&s) {
+                expanded.push(s);
+            }
+        }
+    }
+    if expanded.is_empty() {
+        return Err(GitBridgeError::Command("请选择要提交的文件".into()));
+    }
+    let mut args: Vec<&str> = vec!["add", "--"];
+    args.extend(expanded.iter().map(|s| s.as_str()));
+    run_git(repo, &args)?;
+    run_git(repo, &["commit", "-m", msg])?;
+    let summary = run_git(repo, &["log", "-1", "--format=%h %s"])?.unwrap_or_default();
+    Ok(summary)
+}
+
+/// 在 `repo` 里跑一条无交互 git 命令；成功返回合并后的 stdout+stderr 文本
+/// （stdout 整体 `trim`，供普通文本消息使用）。
 fn run_git(repo: &Path, args: &[&str]) -> Result<Option<String>, GitBridgeError> {
+    run_git_impl(repo, args, true)
+}
+
+/// 同上，但保留 stdout 原样（只去掉结尾换行）。`git status --porcelain` 这类
+/// 布局敏感的文本必须用它：整体 trim 会把首行状态列 ` X` 的前导空格吃掉，
+/// 导致路径切片从第 4 个字符起（丢掉路径首字符）。
+fn run_git_aligned(repo: &Path, args: &[&str]) -> Result<Option<String>, GitBridgeError> {
+    run_git_impl(repo, args, false)
+}
+
+fn run_git_impl(
+    repo: &Path,
+    args: &[&str],
+    trim_stdout: bool,
+) -> Result<Option<String>, GitBridgeError> {
     let out = Command::new("git")
         .args(["-C"])
         .arg(repo)
@@ -476,7 +609,15 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<Option<String>, GitBridgeError>
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .map_err(|_| GitBridgeError::GitNotFound)?;
-    let mut text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut text = if trim_stdout {
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    } else {
+        let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+        while s.ends_with('\n') || s.ends_with('\r') {
+            s.pop();
+        }
+        s
+    };
     if !out.stderr.is_empty() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         if !text.is_empty() {

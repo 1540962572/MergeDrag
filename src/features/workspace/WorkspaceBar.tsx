@@ -10,6 +10,10 @@ interface WorkspaceBarProps {
   onPull: () => void;
   onPush: () => void;
   onResolveConflicts: () => void;
+  /** 所有冲突已解决时收尾合并（生成合并提交）。 */
+  onMergeContinue: () => void;
+  /** 放弃当前合并，回到合并前状态。 */
+  onMergeAbort: () => void;
   /** Git 操作面板的结果提示（渲染在卡片下方 .ws-toast）。 */
   onToast: (m: string) => void;
   /** 分支/暂存/提交任一生效后触发的静默状态刷新（不干扰按钮 busy 态）。 */
@@ -32,6 +36,8 @@ export function WorkspaceBar({
   onPull,
   onPush,
   onResolveConflicts,
+  onMergeContinue,
+  onMergeAbort,
   onToast,
   onChanged,
 }: WorkspaceBarProps) {
@@ -87,15 +93,35 @@ export function WorkspaceBar({
         >
           {busy === "pushing" ? "推送中…" : "推送"}
         </button>
-        {(status.merging || status.unmergedCount > 0) && (
-          <button
-            type="button"
-            onClick={onResolveConflicts}
-            title="列出并打开仓库中的冲突文件"
-          >
-            解决冲突
-            {status.unmergedCount > 0 ? ` (${status.unmergedCount})` : ""}
-          </button>
+        {status.merging && status.unmergedCount === 0 ? (
+          <>
+            <button
+              type="button"
+              onClick={onMergeContinue}
+              title="所有冲突已解决：生成合并提交，结束合并状态"
+            >
+              {busy === "refreshing" ? "收尾中…" : "完成合并"}
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={onMergeAbort}
+              title="git merge --abort：丢弃合并现场，工作树回到合并前"
+            >
+              放弃合并
+            </button>
+          </>
+        ) : (
+          status.unmergedCount > 0 && (
+            <button
+              type="button"
+              onClick={onResolveConflicts}
+              title="列出并打开仓库中的冲突文件"
+            >
+              解决冲突
+              {status.unmergedCount > 0 ? ` (${status.unmergedCount})` : ""}
+            </button>
+          )
         )}
       </div>
       <div className="ws-ops ws-gitops-tools">
@@ -119,7 +145,7 @@ export function WorkspaceBar({
           type="button"
           className={open === "commit" ? "secondary active" : "secondary"}
           onClick={() => toggle("commit")}
-          title="提交全部改动"
+          title="勾选文件逐条提交，或提交全部改动"
         >
           提交
         </button>

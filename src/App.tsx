@@ -203,6 +203,43 @@ export default function App() {
     }
   }, []);
 
+  /** 所有冲突已解决时收尾合并：生成合并提交，结束合并状态。 */
+  const mergeContinueWs = useCallback(async () => {
+    setWsBusy("refreshing");
+    setWsToast(null);
+    try {
+      const out = await invoke<string>("merge_continue");
+      setWsToast(out ? `合并完成：${out}` : "合并已完成。");
+      await syncWsStatus();
+      await loadConflicts(); // 冲突已收尾，左栏清空
+    } catch (e) {
+      setWsToast(`完成合并失败: ${e}`);
+    }
+    setWsBusy("idle");
+  }, [syncWsStatus, loadConflicts]);
+
+  /** 放弃当前合并：丢弃合并现场，回到合并前工作树。 */
+  const mergeAbortWs = useCallback(async () => {
+    if (
+      !window.confirm(
+        "放弃当前合并？所有合并产生的改动将被丢弃，工作树回到合并前状态。",
+      )
+    ) {
+      return;
+    }
+    setWsBusy("refreshing");
+    setWsToast(null);
+    try {
+      const out = await invoke<string>("merge_abort");
+      setWsToast(out || "已放弃合并。");
+      await syncWsStatus();
+      await loadConflicts();
+    } catch (e) {
+      setWsToast(`放弃合并失败: ${e}`);
+    }
+    setWsBusy("idle");
+  }, [syncWsStatus, loadConflicts]);
+
   const current: MergeDocument | null = session.current ?? null;
 
   /** 空壳首页：未开工作区、未通过 mergetool 启动会话时显示。 */
@@ -469,6 +506,8 @@ export default function App() {
                     onPull={pullWs}
                     onPush={pushWs}
                     onResolveConflicts={resolveConflicts}
+                    onMergeContinue={mergeContinueWs}
+                    onMergeAbort={mergeAbortWs}
                     onToast={setWsToast}
                     onChanged={syncWsStatus}
                   />

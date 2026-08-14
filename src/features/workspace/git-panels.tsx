@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { BranchInfo, StashEntry } from "../../shared/types";
+import type { BranchInfo, ChangeEntry, StashEntry } from "../../shared/types";
 
 /**
  * 工作区卡片里的三个内联 Git 操作面板：分支 / 暂存 / 提交。
@@ -160,10 +160,11 @@ export function BranchPanel({ onToast, onChanged }: GitPanelProps) {
   );
 }
 
-/** 暂存面板：列表 + 应用/删除 + 保存当前改动。 */
+/** 暂存面板：列表 + 应用/删除 + 保存当前改动（可带未跟踪文件）。 */
 export function StashPanel({ onToast, onChanged }: GitPanelProps) {
   const [stashes, setStashes] = useState<StashEntry[]>([]);
   const [msg, setMsg] = useState("");
+  const [includeUntracked, setIncludeUntracked] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = async () => {
@@ -186,8 +187,11 @@ export function StashPanel({ onToast, onChanged }: GitPanelProps) {
     try {
       const out = await invoke<string>("stash_push", {
         message: msg.trim() || null,
+        includeUntracked,
       });
-      onToast(out || "改动已保存到 stash");
+      onToast(
+        includeUntracked ? "改动（含未跟踪文件）已保存到 stash" : out || "改动已保存到 stash",
+      );
       setMsg("");
       await load();
       onChanged();
@@ -285,22 +289,105 @@ export function StashPanel({ onToast, onChanged }: GitPanelProps) {
         <button
           type="button"
           disabled={busy}
-          title="git stash push：保存已跟踪文件的改动"
+          title="git stash push：保存已跟踪文件的改动（勾选后连同未跟踪新文件一起）"
           onClick={() => void save()}
         >
           保存
         </button>
       </div>
+      <label className="ws-stash-u">
+        <input
+          type="checkbox"
+          checked={includeUntracked}
+          onChange={(e) => setIncludeUntracked(e.target.checked)}
+        />
+        连同未跟踪文件（git stash push -u）
+      </label>
     </div>
   );
 }
 
-/** 提交面板：一次 `git add -A` + `git commit -m`。 */
+/** 状态字母 → 徽标文案/样式（M 修改 / A 新增 / D 删除 / R 重命名 / ? 未跟踪）。 */
+const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
+  M: { label: "改", cls: "s-m" },
+  A: { label: "新", cls: "s-a" },
+  D: { label: "删", cls: "s-d" },
+  R: { label: "移", cls: "s-r" },
+  "?": { label: "未跟踪", cls: "s-u" },
+};
+
+/** 提交面板：勾选文件逐条提交（git add <paths> + commit），也可一键「提交全部」。 */
 export function CommitPanel({ onToast, onChanged }: GitPanelProps) {
   const [msg, setMsg] = useState("");
+  const [changes, setChanges] = useState<ChangeEntry[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
 
-  const commit = async () => {
+  const load = async () => {
+    try {
+      const list = await invoke<ChangeEntry[]>("list_changes");
+      setChanges(list);
+      // 清理已提交/移除文件的勾选。
+      const paths = new Set(list.map((c) => c.path));
+      setSelected((prev) => new Set([...prev].filter((p) => paths.has(p))));
+    } catch (e) {
+      onToast(`读取改动失败: ${e}`);
+    }
+  };
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const toggle = (path: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    setSelected((prev) =>
+      prev.size === changes.length && changes.length > 0
+        ? new Set()
+        : new Set(changes.map((c) => c.path)),
+    );
+  };
+
+  const commitSelected = async () => {
+    const m = msg.trim();
+    if (selected.size === 0) {
+      onToast("请先勾选要提交的文件");
+      return;
+    }
+    if (!m) {
+      onToast("请输入提交信息");
+      return;
+    }
+    if (!inTauri()) {
+      onToast("浏览器模式无法操作 Git");
+      return;
+    }
+    setBusy(true);
+    try {
+      const summary = await invoke<string>("commit_files", {
+        paths: [...selected],
+        message: m,
+      });
+      onToast(`已提交 ${summary}`);
+      setMsg("");
+      setSelected(new Set());
+      await load();
+      onChanged();
+    } catch (e) {
+      onToast(`提交失败: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const commitAll = async () => {
     const m = msg.trim();
     if (!m) {
       onToast("请输入提交信息");
@@ -315,6 +402,8 @@ export function CommitPanel({ onToast, onChanged }: GitPanelProps) {
       const summary = await invoke<string>("commit_all", { message: m });
       onToast(`已提交 ${summary}`);
       setMsg("");
+      setSelected(new Set());
+      await load();
       onChanged();
     } catch (e) {
       onToast(`提交失败: ${e}`);
@@ -327,10 +416,43 @@ export function CommitPanel({ onToast, onChanged }: GitPanelProps) {
     <div className="ws-panel">
       <div className="ws-panel-head">
         <span className="ws-panel-title">提交</span>
-        <span className="ws-panel-note" title="git add -A + git commit -m">
-          将暂存并提交全部改动（含新增文件）
+        <span className="ws-panel-note">
+          {changes.length === 0
+            ? "没有未提交改动"
+            : `已勾选 ${selected.size}/${changes.length} 项`}
         </span>
       </div>
+      <ul className="ws-plist">
+        {changes.map((c) => {
+          const badge = STATUS_BADGE[c.status] ?? { label: c.status, cls: "s-u" };
+          return (
+            <li key={c.path}>
+              <label className="ws-cchk">
+                <input
+                  type="checkbox"
+                  checked={selected.has(c.path)}
+                  onChange={() => toggle(c.path)}
+                />
+                <span className={`ws-cbadge ${badge.cls}`}>{badge.label}</span>
+                <span className="ws-bname" title={c.path}>
+                  {c.path}
+                </span>
+              </label>
+            </li>
+          );
+        })}
+        {changes.length === 0 && <li className="empty">（没有未提交改动）</li>}
+      </ul>
+      {changes.length > 0 && (
+        <button
+          type="button"
+          className="secondary ws-cselall"
+          disabled={busy}
+          onClick={toggleAll}
+        >
+          {selected.size === changes.length ? "全部取消" : "全选"}
+        </button>
+      )}
       <textarea
         className="ws-commit-input"
         value={msg}
@@ -338,19 +460,29 @@ export function CommitPanel({ onToast, onChanged }: GitPanelProps) {
         placeholder="提交信息（第一行为标题）"
         rows={3}
         onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") void commit();
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") void commitSelected();
         }}
       />
       <div className="ws-panel-row ws-commit-actions">
         <button
           type="button"
-          disabled={busy || !msg.trim()}
-          onClick={() => void commit()}
+          disabled={busy || !msg.trim() || selected.size === 0}
+          title="只暂存并提交勾选的文件"
+          onClick={() => void commitSelected()}
         >
-          {busy ? "提交中…" : "提交全部"}
+          {busy ? "提交中…" : `提交选中 (${selected.size})`}
         </button>
-        <span className="ws-commit-hint">Ctrl+Enter 提交</span>
+        <button
+          type="button"
+          className="secondary"
+          disabled={busy || !msg.trim()}
+          title="git add -A + git commit -m（含新增文件）"
+          onClick={() => void commitAll()}
+        >
+          提交全部
+        </button>
       </div>
+      <div className="ws-commit-hint">Ctrl+Enter 提交勾选</div>
     </div>
   );
 }
