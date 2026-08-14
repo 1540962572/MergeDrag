@@ -1,0 +1,316 @@
+:root {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --bg-panel: #252526;
+  --bg-list: #2d2d30;
+  --border: #3c3c3c;
+  --text: #cccccc;
+  --text-dim: #858585;
+  --accent: #0e639c;
+  --conflict: #c74e39;
+  --resolved: #3d8b40;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.file-list {
+  width: 280px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-list);
+  overflow: auto;
+}
+
+.file-list h2 {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.file-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.file-list li {
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+
+.file-list li.active {
+  background: #37373d;
+  border-left-color: var(--accent);
+}
+
+.file-list .status {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.file-list .status.unresolved {
+  color: var(--conflict);
+}
+
+.file-list .status.resolved {
+  color: var(--resolved);
+}
+
+.file-list .status.binary {
+  color: #c586c0;
+}
+
+.pane-actions {
+  float: right;
+}
+
+.hunk-actions button.mini {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0 6px;
+  margin-left: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.hunk-actions button.mini:hover {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.three-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.merge-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-wrap: wrap;
+}
+
+.toolbar-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 3px 10px;
+}
+
+.toolbar-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.toolbar-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.toolbar-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+}
+
+.block-counter {
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 44px;
+}
+
+.block-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  background: #3a2a1f;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.block-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.block-actions button.mini {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 1px 8px;
+  font-size: 12px;
+}
+
+.block-actions button.mini:hover {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.pane-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane-grid.four {
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+}
+
+/* Monaco 行装饰：未解决冲突块 */
+.md-block-unresolved {
+  background: rgba(199, 78, 57, 0.16);
+}
+
+.md-block-active {
+  background: rgba(199, 78, 57, 0.3);
+  border-top: 1px solid rgba(199, 78, 57, 0.9);
+  border-bottom: 1px solid rgba(199, 78, 57, 0.9);
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+
+.pane:last-child {
+  border-right: none;
+}
+
+.pane-title {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.empty-state {
+  padding: 24px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.status-bar {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 12px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+}
+
+button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.mergetool-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mergetool-banner.ok {
+  background: #1e3a22;
+  color: #9ccc9c;
+}
+
+.mergetool-banner.err {
+  background: #3a2420;
+  color: #e0a89c;
+}
+
+button.save:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.save:hover:not(:disabled) {
+  background: var(--resolved);
+}
