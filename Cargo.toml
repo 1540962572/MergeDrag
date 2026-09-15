@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri", "src-tauri/crates/merge-core", "src-tauri/crates/git-bridge"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+version = "0.2.0"
+
+[workspace.dependencies]
+merge-core = { path = "src-tauri/crates/merge-core" }
+git-bridge = { path = "src-tauri/crates/git-bridge" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
